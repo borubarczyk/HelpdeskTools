@@ -699,4 +699,29 @@ function Group-HTWarningMessages {
     }
     foreach ($text in $order) { if ($counts[$text] -gt 1) { "$text (×$($counts[$text]))" } else { $text } }
 }
+
+# Znane ostrzeżenia poleceń, które nie wskazują problemu: celowo ograniczona liczba wyników, przestarzałe parametry
+# poleceń Exchange, format daty skrzynki niepasujący do języka, obiekt tenanta z niespójnymi danymi (zgłasza go Exchange
+# przy każdym odczycie listy) - w dzienniku jako informacja, a nie ostrzeżenie
+$script:BenignWarningPatterns = @(
+    'There are more results available than are currently displayed'
+    'isn''t valid for current language setting'
+    'parameters of this cmdlet are deprecated'
+    'has been corrupted or isn''t compatible with Microsoft support requirements'
+    'The following validation errors happened'
+)
+
+function Test-HTBenignWarning {
+    param([AllowEmptyString()][string]$Text)
+    foreach ($p in $script:BenignWarningPatterns) { if ($Text -like "*$p*") { return $true } }
+    return $false
+}
+
+function Write-HTCommandWarnings {
+    # Ostrzeżenia poleceń do dziennika (bez powtórzeń); znane, nieszkodliwe - jako informacja
+    param([AllowEmptyCollection()][string[]]$Messages = @(), [string]$Where = 'polecenie')
+    foreach ($line in @(Group-HTWarningMessages -Messages $Messages)) {
+        Write-Log -Message "Ostrzeżenie ($Where): $line" -Type $(if (Test-HTBenignWarning $line) { 'Info' } else { 'Warn' })
+    }
+}
 #endregion

@@ -2695,7 +2695,7 @@ function Invoke-HTUiAction {
             $script:UI.CommandWarnings = $null
             if ($warnings -and $warnings.Count) {
                 $where = if ($Module -and $Module.Title) { [string]$Module.Title } else { 'polecenie' }
-                foreach ($line in @(Group-HTWarningMessages -Messages $warnings.ToArray())) { Write-Log -Message "Ostrzeżenie ($where): $line" -Type 'Warn' }
+                Write-HTCommandWarnings -Messages $warnings.ToArray() -Where $where
             }
         }
     }
@@ -7215,7 +7215,7 @@ function Invoke-HTBackground {
         if ("$($ps.InvocationStateInfo.State)" -eq 'Stopped') { throw (New-Object System.OperationCanceledException("Przerwano: $Name")) }
         foreach ($err in @($ps.Streams.Error)) { Write-Log -Message "$($Name): $($err.Exception.Message)" -Type 'Warn' }
         # Ostrzeżenia poleceń z wątku w tle - do dziennika (bez powtórzeń)
-        foreach ($line in @(Group-HTWarningMessages -Messages @($ps.Streams.Warning | ForEach-Object { $_.Message }))) { Write-Log -Message "Ostrzeżenie ($Name): $line" -Type 'Warn' }
+        Write-HTCommandWarnings -Messages @($ps.Streams.Warning | ForEach-Object { [string]$_.Message }) -Where $Name
     }
     finally {
         $bg.Current = $previous
@@ -8032,6 +8032,12 @@ function Restore-HTPanelSelection {
     }
 }
 
+function Test-HTPermissionErrorText {
+    # Komunikat o braku roli lub uprawnień konta (a nie o błędzie programu) - w przeglądzie sekcji wynik «Uwaga»
+    param([AllowEmptyString()][string]$Text)
+    return ($Text -match '(?i)nie ma roli|wymaga roli|brak uprawnień|brak roli|Authorization_RequestDenied|Insufficient privileges|\bForbidden\b|\b403\b|Access is denied|\bAccess denied|AccessDenied|do(es)? not have (the )?(required |sufficient )?(permission|access|rights)')
+}
+
 function Invoke-HTModuleSweep {
     <#
         Przegląd modułów: dla każdego modułu wybranych przestrzeni - otwarcie (zbudowanie), przykładowy obiekt na liście po
@@ -8096,10 +8102,14 @@ function Invoke-HTModuleSweep {
                             $errorRows = @($m.Table.Rows | Where-Object { [string]$_['Status'] -like 'Błąd*' } | ForEach-Object { if ($m.Table.Columns.Contains('Szczegóły')) { [string]$_['Szczegóły'] } else { 'wiersz z błędem' } })
                         }
                         $details = "wyników: $rows"
-                        if ($errorRows.Count) { $status = 'Błąd'; $details = "wiersze z błędem: $($errorRows.Count) - $(@($errorRows | Select-Object -First 2) -join ' | ')" }
+                        if ($errorRows.Count) {
+                            # Sam brak roli / uprawnień konta to nie błąd programu - «Uwaga» z opisem, czego brakuje
+                            $status = if (@($errorRows | Where-Object { -not (Test-HTPermissionErrorText $_) }).Count) { 'Błąd' } else { 'Uwaga' }
+                            $details = "$(if ($status -eq 'Uwaga') { 'brak uprawnień konta - wiersze' } else { 'wiersze z błędem' }): $($errorRows.Count) - $(@($errorRows | Select-Object -First 2) -join ' | ')"
+                        }
                     }
                 }
-                catch { $status = 'Błąd'; $details = $_.Exception.Message }
+                catch { $status = $(if (Test-HTPermissionErrorText $_.Exception.Message) { 'Uwaga' } else { 'Błąd' }); $details = $_.Exception.Message }
                 finally {
                     $dialogs = @(Stop-HTDialogCapture)
                     $logErrors = @($script:UI.SweepLog)

@@ -181,3 +181,58 @@ Describe "Kopie wiadomości wysłanych przez delegatów" {
         $s.__flag | Should -Be 'warn'
     }
 }
+
+Describe "Elementy do odzyskania bez roli Mailbox Import Export" {
+    It "brak polecenia Get-RecoverableItems w sesji - komunikat o roli zamiast «is not recognized»" {
+        Remove-Item -Path Function:\global:Get-RecoverableItems -ErrorAction SilentlyContinue
+        if (Get-Command -Name Get-RecoverableItems -ErrorAction SilentlyContinue) { Set-ItResult -Skipped -Because 'polecenie Get-RecoverableItems jest dostępne w tej sesji' ; return }
+        { Get-HTRecoverableItems -Identity 'jan@contoso.pl' } | Should -Throw '*Mailbox Import Export*'
+    }
+}
+
+Describe "Ustawienia rezerwacji sali" {
+    BeforeAll {
+        New-HTTestStub -Name 'Get-CalendarProcessing' -Parameters 'Identity'
+        New-HTTestStub -Name 'Get-Place' -Parameters 'Identity'
+        New-HTTestStub -Name 'Get-EXORecipient' -Parameters 'Identity', 'Properties'
+    }
+    BeforeEach {
+        Mock -ModuleName MailboxesExchangeOnline Get-CalendarProcessing { [PSCustomObject]@{ AutomateProcessing = 'AutoAccept'; BookingWindowInDays = 180 } }
+        Mock -ModuleName MailboxesExchangeOnline Get-Place { [PSCustomObject]@{ Capacity = 10; Building = 'A'; Floor = 2 } }
+        Mock -ModuleName MailboxesExchangeOnline Get-EXORecipient { [PSCustomObject]@{ RecipientTypeDetails = 'UserMailbox' } }
+    }
+    It "dla zwykłej skrzynki nie pyta usługi Places (Get-Place obsługuje tylko sale i sprzęt)" {
+        $r = Get-HTRoomBookingSettings -Identity 'jan@contoso.pl'
+        $r.Sala | Should -Be 'jan@contoso.pl'
+        Should -Invoke -ModuleName MailboxesExchangeOnline Get-Place -Times 0
+    }
+    It "dla sali z podanym typem odczytuje miejsce bez dodatkowego zapytania o typ" {
+        $r = Get-HTRoomBookingSettings -Identity 'sala@contoso.pl' -RecipientTypeDetails 'RoomMailbox'
+        $r.'Pojemność' | Should -Be 10
+        Should -Invoke -ModuleName MailboxesExchangeOnline Get-EXORecipient -Times 0
+    }
+}
+
+Describe "Dostęp użytkownika do skrzynek" {
+    BeforeAll {
+        New-HTTestStub -Name 'Get-EXORecipient' -Parameters 'Identity', 'Properties'
+        New-HTTestStub -Name 'Get-EXOMailbox' -Parameters 'Identity', 'ResultSize', 'Properties', 'RecipientTypeDetails', 'Filter'
+        New-HTTestStub -Name 'Get-EXOMailboxPermission' -Parameters 'Identity', 'User'
+        New-HTTestStub -Name 'Get-RecipientPermission' -Parameters 'Identity', 'Trustee', 'ResultSize'
+        New-HTTestStub -Name 'Get-EXORecipientPermission' -Parameters 'Identity', 'Trustee', 'ResultSize'
+    }
+    It "«Wyślij jako» w całej organizacji - Get-RecipientPermission -Trustee (Get-EXORecipientPermission wymaga -Identity)" {
+        Mock -ModuleName MailboxesExchangeOnline Get-EXORecipient { [PSCustomObject]@{ PrimarySmtpAddress = 'jan@contoso.pl'; Name = 'jan'; DisplayName = 'Jan'; Alias = 'jan'; ExternalDirectoryObjectId = 'id1'; EmailAddresses = @('SMTP:jan@contoso.pl') } }
+        Mock -ModuleName MailboxesExchangeOnline Get-EXOMailbox {
+            if ($Identity) { [PSCustomObject]@{ UserPrincipalName = 'jan@contoso.pl' } }
+            else { @([PSCustomObject]@{ Name = 'Biuro'; DisplayName = 'Biuro'; PrimarySmtpAddress = 'biuro@contoso.pl'; RecipientTypeDetails = 'SharedMailbox'; GrantSendOnBehalfTo = @('jan') }) }
+        }
+        Mock -ModuleName MailboxesExchangeOnline Get-EXOMailboxPermission { @([PSCustomObject]@{ User = 'jan@contoso.pl'; IsInherited = $false }) }
+        Mock -ModuleName MailboxesExchangeOnline Get-RecipientPermission { @([PSCustomObject]@{ Identity = 'Biuro'; Trustee = 'jan@contoso.pl'; AccessRights = @('SendAs'); IsInherited = $false }) }
+        Mock -ModuleName MailboxesExchangeOnline Get-EXORecipientPermission { throw 'Trustee parameter can be used only with Identity or ExternalDirectoryObjectId or UserPrincipalName' }
+        $rows = @(Get-HTUserMailboxAccess -User 'jan@contoso.pl')
+        @($rows | ForEach-Object { $_.Uprawnienie }) | Should -Be @('FullAccess', 'SendOnBehalf', 'SendAs')
+        Should -Invoke -ModuleName MailboxesExchangeOnline Get-RecipientPermission -Times 1 -ParameterFilter { $Trustee -eq 'jan@contoso.pl' }
+        Should -Invoke -ModuleName MailboxesExchangeOnline Get-EXORecipientPermission -Times 0
+    }
+}

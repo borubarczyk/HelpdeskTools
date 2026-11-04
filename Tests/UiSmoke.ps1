@@ -177,7 +177,11 @@ try {
     $keys = @(Get-HTModuleDefinitions | ForEach-Object { $_.Key })
     $unknown = @(Get-HTSelfTests -IncludeWrite -IncludeSlow | ForEach-Object { $t = $_; @($t.Modules) | Where-Object { $keys -notcontains $_ } | ForEach-Object { "$($t.Key): $_" } })
     if ($unknown.Count) { $failures.Add("Testy zapisu wskazują nieistniejące moduły: $($unknown -join ', ').") }
-    Write-Host "Pokrycie testami: pełne $(@($coverage | Where-Object Pokrycie -eq 'pełne').Count), tylko odczyt $(@($coverage | Where-Object Pokrycie -eq 'tylko odczyt').Count), brak $(@($coverage | Where-Object Pokrycie -eq 'brak').Count)."
+    $exemptUnknown = @((Get-HTSelfTestExemptions).Keys | Where-Object { $keys -notcontains $_ })
+    if ($exemptUnknown.Count) { $failures.Add("Wyjątki bez testu zapisu wskazują nieistniejące moduły: $($exemptUnknown -join ', ').") }
+    $count = { param($state) @($coverage | Where-Object { $_.Pokrycie -eq $state }).Count }
+    Write-Host "Pokrycie testami: pełne $(& $count 'pełne'), tylko odczyt $(& $count 'tylko odczyt'), zmiany bez testu (z powodem) $(& $count 'zmiany bez testu'), brak $(& $count 'brak')."
+    Write-Host "Moduły ze zmianami bez testu zapisu: $(@($coverage | Where-Object { $_.Pokrycie -eq 'tylko odczyt' } | ForEach-Object { $_.Klucz }) -join ', ')"
 }
 catch { $failures.Add("Pokrycie testami: $($_.Exception.Message)") }
 
