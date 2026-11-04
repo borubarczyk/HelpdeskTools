@@ -16,11 +16,16 @@
 ## Wymagania
 
 - **System**: Windows 10/11 lub Windows Server 2016+.
-- **PowerShell**: 7.2 lub nowszy (`pwsh`), uruchomiony jako administrator.
-- **Moduły PowerShell** (instalowane automatycznie po potwierdzeniu, przy pierwszym połączeniu):
-  - `Microsoft.Graph.Authentication` - przestrzenie Microsoft 365, Intune, Pulpit.
-  - `ExchangeOnlineManagement` - przestrzeń Exchange.
-  - `PnP.PowerShell` - przestrzeń SharePoint (wymaga własnej rejestracji aplikacji w Entra ID i jej Client ID).
+- **PowerShell**: 7.4 lub nowszy (`pwsh`; PnP.PowerShell 3.x wymaga 7.4), uruchomiony jako administrator.
+- **Moduły PowerShell** (instalowane automatycznie po potwierdzeniu, przy pierwszym połączeniu - w wersji sprawdzonej z programem):
+
+  | Moduł | Sprawdzone wersje | Testowana | Do czego |
+  |---|---|---|---|
+  | `Microsoft.Graph.Authentication` | 2.0 - 2.x | 2.41.1 | przestrzenie Microsoft 365, Grupy, Intune, Pulpit |
+  | `ExchangeOnlineManagement` | 3.7.2 - 3.x | 3.10.1 | przestrzeń Exchange (starsze logują się w osobnym oknie) |
+  | `PnP.PowerShell` | 3.0 - 3.x | 3.4.1 | przestrzeń SharePoint (wymaga własnej rejestracji aplikacji w Entra ID i jej Client ID; PowerShell 7.4+) |
+
+  Moduły Microsoft zmieniają polecenia między wersjami, więc wersje są zdefiniowane w jednym miejscu programu (`$script:HTModuleRequirements` w `Modules/ModulesConnection.psm1`): brakujący moduł instaluje się w wersji testowanej, przy łączeniu program wybiera najnowszą zainstalowaną wersję ze sprawdzonego zakresu (np. PnP 3.x, nawet gdy jest też 4.x), a gdy są tylko wersje spoza zakresu - proponuje doinstalować sprawdzoną obok. Stan: Pulpit > «Moduły i środowisko» (kolumna «Sprawdzone», prawy przycisk - «Zainstaluj sprawdzoną wersję») i autotest («Moduły PowerShell i ich wersje»).
   - `ActiveDirectory` (RSAT) - tylko po włączeniu funkcji lokalnych: przestrzenie Użytkownicy / Komputery / Grupy AD. Instalacja: `Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0` (Windows 10/11) lub `Install-WindowsFeature RSAT-AD-PowerShell` (Windows Server).
 - **Uprawnienia**: odpowiednie role administracyjne (np. User Administrator, Exchange Administrator, Intune Administrator). Przy pierwszym połączeniu z Graph może być wymagana zgoda administratora na uprawnienia z klucza `GraphScopes`.
 
@@ -315,6 +320,7 @@ Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
 18. **Exchange: polecenie albo logowanie nie działa po aktualizacji do 3.9.0** - wyłącz «Exchange w osobnym wątku» (Ustawienia > Microsoft 365 i Exchange), rozłącz i połącz ponownie z Exchange, a dziennik z włączonym trybem szczegółowym (debug) prześlij do analizy - wpisy «Wątek Exchange: …» pokazują moduł i listę pośredników.
 19. **Exchange: po zalogowaniu program wisi (3.9.0-3.10.0)** - po połączeniu wątek Exchange szukał poleceń programu przez Get-Command, które samo wczytywało moduły z poleceniami o tych nazwach (np. starsze PnP i Graph z folderu modułów w OneDrive) - zawieszenie albo konflikt bibliotek. Od 3.10.1 pośrednicy powstają tylko z poleceń wczytanych modułów usługi. Dziennik debug pokazuje teraz czas logowania («Connect-ExchangeOnline zakończone po … s») i tworzenia pośredników.
 20. **SharePoint: polecenie PnP albo logowanie do witryny nie działa po aktualizacji do 3.10.0** - wyłącz «SharePoint (PnP) w osobnym wątku» (Ustawienia > SharePoint), rozłącz i połącz ponownie z SharePoint, a dziennik z trybem szczegółowym (debug) prześlij do analizy - wpisy «Wątek SharePoint: …» pokazują moduł i listę pośredników.
+21. **SharePoint: «Informacje o witrynie» - błąd `Cannot validate argument on parameter 'Includes'. The argument "StorageQuota" does not belong to the set…`** (3.15.0 i starsze z PnP.PowerShell 3.x) - PnP 3.x sprawdza `Get-PnPSite -Includes` listą właściwości obiektu witryny, a limit magazynu, blokada i udostępnianie zewnętrzne należą do witryny w tenancie. Od 3.15.1 program czyta je z `Get-PnPTenantSite` (rola administratora SharePoint; bez niej - opis zamiast wartości). Bardzo długie komunikaty błędów (np. setki dozwolonych wartości) są skracane w dzienniku, oknach błędów i danych do zgłoszenia. Domyślny adres witryny w Ustawieniach jest teraz pusty (dawny przykład `contoso.sharepoint.com` nie jest używany do łączenia), a błąd «NotFound» przy łączeniu podpowiada, że witryna o tym adresie nie istnieje.
 
 ## Licencja
 

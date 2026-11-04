@@ -514,3 +514,33 @@ Describe "Domeny tenanta" {
         Compare-HTDnsRecordValue -Expected '' -Actual @('x') | Should -BeFalse
     }
 }
+
+Describe "Informacje o witrynie SharePoint (PnP 3.x)" {
+    BeforeAll {
+        Import-HTTestModule -Name "GraphAPISharePoint"
+        # Atrapy z walidacją -Includes jak w PnP.PowerShell 3.x (fragment listy właściwości Site / Web)
+        function global:Get-PnPSite { param([ValidateSet('Usage', 'Owner', 'Url', 'ServerRelativeUrl', 'ReadOnly', 'WriteLocked', 'RootWeb', 'Id')][string[]]$Includes, $ErrorAction)
+            [PSCustomObject]@{ Url = 'https://firma.sharepoint.com/sites/Kadry'; ReadOnly = $false; WriteLocked = $false; Owner = [PSCustomObject]@{ Title = 'Anna'; Email = 'anna@firma.pl' }; Usage = [PSCustomObject]@{ Storage = 1GB; StoragePercentageUsed = 0.25 } } }
+        function global:Get-PnPWeb { param([ValidateSet('Created', 'LastItemModifiedDate', 'Language', 'WebTemplate', 'Description', 'Title', 'RoleAssignments')][string[]]$Includes, $ErrorAction)
+            [PSCustomObject]@{ Title = 'Kadry'; Description = ''; WebTemplate = 'GROUP'; Created = (Get-Date '2025-01-01'); LastItemModifiedDate = (Get-Date '2026-10-01') } }
+        function global:Get-PnPSiteCollectionAdmin { param($ErrorAction) [PSCustomObject]@{ Title = 'Admin'; Email = 'admin@firma.pl' } }
+    }
+    AfterAll {
+        foreach ($n in 'Get-PnPSite', 'Get-PnPWeb', 'Get-PnPSiteCollectionAdmin', 'Get-PnPTenantSite') { Remove-Item -LiteralPath "Function:$n" -ErrorAction SilentlyContinue }
+    }
+    It "bez roli administratora SharePoint - opis zamiast limitu i udostępniania, bez błędu" {
+        function global:Get-PnPTenantSite { param($Identity, $ErrorAction) throw 'Access denied' }
+        $info = Get-HTSPSiteInfo
+        $info.'Tytuł' | Should -Be 'Kadry'
+        $info.Magazyn.Limit | Should -Match 'administratora'
+        $info.Magazyn.'Procent limitu' | Should -Match '25'
+        $info.'Udostępnianie zewnętrzne' | Should -Match 'administratora'
+    }
+    It "z rolą administratora - limit, blokada i udostępnianie z witryny w tenancie" {
+        function global:Get-PnPTenantSite { param($Identity, $ErrorAction) [PSCustomObject]@{ StorageQuota = 1024; LockState = 'Unlock'; SharingCapability = 'ExternalUserSharingOnly' } }
+        $info = Get-HTSPSiteInfo
+        $info.Magazyn.Limit | Should -Be (Format-HTBytes (1024 * 1MB))
+        $info.'Stan blokady' | Should -Be 'Unlock'
+        $info.'Udostępnianie zewnętrzne' | Should -Be 'ExternalUserSharingOnly'
+    }
+}

@@ -1,6 +1,6 @@
 ﻿BeforeAll {
     . (Join-Path $PSScriptRoot "TestHelpers.ps1")
-    Import-HTTestModule -Name "Utils", "TenantSelfTest"
+    Import-HTTestModule -Name "Utils", "ModulesConnection", "TenantSelfTest"
     Initialize-HTTestEnvironment -Root $TestDrive
 }
 
@@ -104,5 +104,14 @@ Describe "Autotest: raport do zgłoszenia problemu" {
         $report.Count | Should -Be 2
         $report[0] | Should -Match 'testów 2 - OK: 1, uwagi: 0, błędy: 1'
         $report[1] | Should -Match 'Zepsuty test.*awaria'
+    }
+}
+
+Describe "Autotest: wersje modułów" {
+    It "test modułów korzysta z tabeli wymaganych wersji programu" {
+        $t = @(Get-HTSelfTests -Key 'local.modules')[0]
+        $t.Test.ToString() | Should -Match 'Get-HTModuleRequirements'
+        $row = @(Invoke-HTSelfTest -Tests @($t))[0]
+        $row.Status | Should -Not -Be 'Błąd'
     }
 }

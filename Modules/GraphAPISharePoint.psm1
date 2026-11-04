@@ -356,11 +356,22 @@ function Get-HTSPUniquePermissionsReport {
 
 #region Witryna
 function Get-HTSPSiteInfo {
-    $site = Get-PnPSite -Includes Usage, Owner, StorageQuota, Url, ServerRelativeUrl, LockState, SharingCapability -ErrorAction Stop
+    <#
+        Informacje o połączonej witrynie. Get-PnPSite -Includes przyjmuje tylko właściwości obiektu Site (PnP 3.x sprawdza je
+        listą) - limit magazynu, blokada i udostępnianie zewnętrzne są właściwościami witryny w tenancie (Get-PnPTenantSite,
+        wymaga roli administratora SharePoint); bez tej roli - opis zamiast błędu.
+    #>
+    $site = Get-PnPSite -Includes Usage, Owner, Url, ServerRelativeUrl, ReadOnly, WriteLocked -ErrorAction Stop
     $web = Get-PnPWeb -Includes Created, LastItemModifiedDate, Language, WebTemplate, Description -ErrorAction Stop
     $admins = @()
     try { $admins = @(Get-PnPSiteCollectionAdmin -ErrorAction Stop | ForEach-Object { "$($_.Title) <$($_.Email)>" }) } catch { $admins = @("(brak uprawnień do odczytu)") }
+    $tenantSite = $null
+    $tenantNote = ''
+    try { $tenantSite = Get-PnPTenantSite -Identity $site.Url -ErrorAction Stop }
+    catch { $tenantNote = '(wymaga roli administratora SharePoint)'; Write-Log -Message "Witryna w tenancie (Get-PnPTenantSite): $($_.Exception.Message)" -Type 'Debug' }
     $usage = $site.Usage
+    $quotaMb = if ($tenantSite -and $tenantSite.StorageQuota) { [double]$tenantSite.StorageQuota } else { 0 }
+    $lock = if ($tenantSite -and $tenantSite.LockState) { "$($tenantSite.LockState)" } elseif ($site.ReadOnly) { 'ReadOnly' } elseif ($site.WriteLocked) { 'NoAdditions' } elseif ($tenantNote) { "Unlock $tenantNote" } else { 'Unlock' }
     return [ordered]@{
         "Tytuł"                   = $web.Title
         "Adres"                   = $site.Url
@@ -369,11 +380,12 @@ function Get-HTSPSiteInfo {
         "Utworzono"               = $web.Created
         "Ostatnia zmiana"         = $web.LastItemModifiedDate
         "Właściciel"              = if ($site.Owner) { "$($site.Owner.Title) <$($site.Owner.Email)>" } else { "" }
-        "Stan blokady"            = "$($site.LockState)"
+        "Stan blokady"            = $lock
+        "Udostępnianie zewnętrzne" = if ($tenantSite) { "$($tenantSite.SharingCapability)" } else { $tenantNote }
         "Magazyn"                 = [ordered]@{
             "Wykorzystano"        = if ($usage) { Format-HTBytes $usage.Storage } else { "" }
             "Procent limitu"      = if ($usage) { "{0:N1}%" -f ($usage.StoragePercentageUsed * 100) } else { "" }
-            "Limit"               = if ($site.StorageQuota) { Format-HTBytes ($site.StorageQuota * 1MB) } else { "" }
+            "Limit"               = if ($quotaMb) { Format-HTBytes ($quotaMb * 1MB) } else { $tenantNote }
         }
         "Administratorzy kolekcji" = [ordered]@{ "Konta" = $admins }
     }

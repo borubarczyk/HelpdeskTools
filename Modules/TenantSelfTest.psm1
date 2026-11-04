@@ -155,7 +155,7 @@ function Invoke-HTSelfTest {
             catch {
                 $message = [string]$_.Exception.Message
                 if ($message.StartsWith($script:SelfTestSkip)) { $status = 'Pominięto'; $details = $message.Substring($script:SelfTestSkip.Length) }
-                else { $status = 'Błąd'; $details = $message }
+                else { $status = 'Błąd'; $details = $(if (Get-Command -Name Compress-HTErrorText -ErrorAction Ignore) { Compress-HTErrorText -Text $message } else { $message }) }
             }
             $cleanupErrors = @(Invoke-HTSelfTestCleanup -Context $Context)
             if ($cleanupErrors.Count) {
@@ -285,15 +285,15 @@ function Get-HTSelfTestDomain {
 #endregion
 
 #region Testy: ten komputer
-Register-HTSelfTest -Key 'local.modules' -Name 'Moduły PowerShell' -Service 'Lokalnie' -Area 'Instalacja' -Test {
-    $names = @('Microsoft.Graph.Authentication', 'ExchangeOnlineManagement', 'PnP.PowerShell')
-    $found = foreach ($n in $names) {
-        $m = @(Get-Module -ListAvailable -Name $n | Sort-Object Version -Descending)[0]
-        if ($m) { "$n $($m.Version)" } else { "$n - brak" }
+Register-HTSelfTest -Key 'local.modules' -Name 'Moduły PowerShell i ich wersje' -Service 'Lokalnie' -Area 'Instalacja' `
+    -Description 'Wersje modułów (wczytanych, a gdy nie są wczytane - najnowszych zainstalowanych) względem wersji sprawdzonych z programem.' -Test {
+    $checks = foreach ($n in @((Get-HTModuleRequirements).Keys)) {
+        $m = @(Get-Module -Name $n | Sort-Object Version -Descending)[0]
+        if (-not $m) { $m = @(Get-Module -ListAvailable -Name $n | Sort-Object Version -Descending)[0] }
+        Test-HTModuleVersion -Name $n -Version $(if ($m) { $m.Version } else { $null })
     }
-    $missing = @($found | Where-Object { $_ -like '* - brak' })
-    $text = "PowerShell $($PSVersionTable.PSVersion); $($found -join ', ')"
-    if ($missing.Count) { return @{ Status = 'Uwaga'; Szczegóły = "$text. Brakujące moduły zainstaluje okno startowe (Ustawienia > Moduły)." } }
+    $text = "PowerShell $($PSVersionTable.PSVersion); $(@($checks | ForEach-Object { $_.Text }) -join '; ')"
+    if (@($checks | Where-Object { $_.Status -ne 'OK' }).Count) { return @{ Status = 'Uwaga'; Szczegóły = $text } }
     return $text
 }
 
