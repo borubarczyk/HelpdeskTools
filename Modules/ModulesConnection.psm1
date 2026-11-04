@@ -519,6 +519,29 @@ function Invoke-HTLogin {
     }
 }
 
+<#
+    Microsoft Graph: parametry logowania interaktywnego. Tokeny są trzymane tylko w pamięci procesu (-ContextScope Process):
+    po zamknięciu programu nie zostają na dysku, a Disconnect-MgGraph nie czyści zapisanej pamięci tokenów MSAL. Od wersji
+    2.38.1 to czyszczenie potrafi się nie udać i wypisać w konsoli ostrzeżenie «Failed to clear the persisted MSAL token
+    cache during Disconnect-MgGraph: The authority (including the tenant ID) must be in a well-formed URI format» - Graph
+    zgłasza je przez polecenie Connect-MgGraph z chwili logowania, więc -WarningAction przy rozłączaniu go nie wycisza.
+#>
+function Get-HTGraphConnectParams {
+    param([string[]]$Scopes = @(), [string]$TenantId = '')
+    $params = @{ Scopes = @($Scopes); NoWelcome = $true; ErrorAction = 'Stop' }
+    if ($TenantId) { $params.TenantId = $TenantId }
+    $command = Get-Command -Name Connect-MgGraph -ErrorAction SilentlyContinue
+    if (-not $command -or $command.Parameters.ContainsKey('ContextScope')) { $params.ContextScope = 'Process' }
+    return $params
+}
+
+# Rozłączenie Microsoft Graph: ostrzeżenia polecenia trafiają do dziennika zamiast do konsoli (po zamknięciu okna)
+function Disconnect-HTGraph {
+    $graphWarnings = $null
+    $null = Disconnect-MgGraph -ErrorAction Stop -WarningAction SilentlyContinue -WarningVariable graphWarnings
+    foreach ($warning in @($graphWarnings)) { if ("$warning") { Write-Log -Message "Rozłączanie Microsoft Graph - ostrzeżenie: $warning" -Type 'Info' } }
+}
+
 # Microsoft Graph: logowanie w przeglądarce zamiast okna Windows (WAM), które potrafi otworzyć się za oknem programu lub poza ekranem
 function Disable-HTGraphWam {
     $command = Get-Command -Name Set-MgGraphOption -ErrorAction SilentlyContinue
@@ -596,8 +619,7 @@ function Connect-Module {
                 }
                 Disable-HTGraphWam
                 $scopes = @(@($Global:GraphScopes) + @($ExtraScopes) | Where-Object { $_ } | Select-Object -Unique)
-                $connectParams = @{ Scopes = $scopes; NoWelcome = $true; ErrorAction = "Stop" }
-                if ($tenantId) { $connectParams.TenantId = $tenantId }
+                $connectParams = Get-HTGraphConnectParams -Scopes $scopes -TenantId "$tenantId"
                 Invoke-HTLogin -Title $(if ($tenantId) { "Microsoft 365 (GDAP)" } else { "Microsoft 365" }) -ScriptBlock { Connect-MgGraph @connectParams }.GetNewClosure()
                 $tenant = Get-HTGraphTenantName
                 $Global:ConnectedToGraphAPI = $true
@@ -988,9 +1010,7 @@ function Set-Connections {
                 }
                 "Graph" {
                     try {
-                        if (Get-Module -Name Microsoft.Graph.Authentication) {
-                            Disconnect-MgGraph -ErrorAction Stop | Out-Null
-                        }
+                        if (Get-Module -Name Microsoft.Graph.Authentication) { Disconnect-HTGraph }
                         Write-Log "Rozłączono Microsoft Graph" -Type "Info"
                     }
                     catch {

@@ -202,6 +202,6 @@ catch {
 }
 finally {
     try { if ($Global:ConnectedToExchange) { Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue } } catch { Write-Verbose $_ }
-    try { if ($Global:ConnectedToGraphAPI) { Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null } } catch { Write-Verbose $_ }
+    try { if ($Global:ConnectedToGraphAPI) { Disconnect-MgGraph -ErrorAction SilentlyContinue -WarningAction SilentlyContinue | Out-Null } } catch { Write-Verbose $_ }
 }
 exit $exitCode
