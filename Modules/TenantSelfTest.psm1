@@ -24,9 +24,11 @@ function Register-HTSelfTest {
         [string]$Description = '',
         # Długi test (np. zespół Teams - replikacja do kilku minut) - uruchamiany tylko na życzenie
         [switch]$Slow,
+        # Moduły programu sprawdzane tym testem (klucze Register-HTModule) - widok «Pokrycie testami»
+        [string[]]$Modules = @(),
         [Parameter(Mandatory)][scriptblock]$Test
     )
-    $definition = @{ Key = $Key; Name = $Name; Service = $Service; Mode = $Mode; Area = $Area; Description = $Description; Slow = [bool]$Slow; Test = $Test }
+    $definition = @{ Key = $Key; Name = $Name; Service = $Service; Mode = $Mode; Area = $Area; Description = $Description; Slow = [bool]$Slow; Modules = @($Modules); Test = $Test }
     for ($i = 0; $i -lt $script:SelfTests.Count; $i++) {
         if ($script:SelfTests[$i].Key -eq $Key) { $script:SelfTests[$i] = $definition; return }
     }
@@ -196,6 +198,39 @@ function Get-HTSelfTestSummary {
 }
 #endregion
 
+#region Pokrycie modułów testami
+function Get-HTSelfTestCoverage {
+    <#
+        Pokrycie modułów programu testami: przegląd sekcji (przycisk odczytu w module) i testy zapisu (-Modules testów).
+        -Modules: opisy modułów @{ Key; Workspace; Category; Title; HasRead; ChangeCount }. Pokrycie: pełne (odczyt i - gdy
+        moduł ma przyciski zmian - test zapisu), tylko odczyt (zmiany bez testu zapisu), brak (ani odczytu, ani testu).
+    #>
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Modules)
+    $byModule = @{}
+    foreach ($t in $script:SelfTests) {
+        foreach ($k in @($t.Modules | Where-Object { $_ })) {
+            if (-not $byModule.ContainsKey($k)) { $byModule[$k] = New-Object System.Collections.Generic.List[string] }
+            $byModule[$k].Add([string]$t.Name)
+        }
+    }
+    foreach ($m in @($Modules)) {
+        $writes = if ($byModule.ContainsKey([string]$m.Key)) { @($byModule[[string]$m.Key]) } else { @() }
+        $state = if (-not $m.HasRead -and -not $writes.Count) { 'brak' } elseif ($m.ChangeCount -gt 0 -and -not $writes.Count) { 'tylko odczyt' } else { 'pełne' }
+        [PSCustomObject][ordered]@{
+            Przestrzeń         = $m.Workspace
+            Kategoria          = $m.Category
+            Moduł              = $m.Title
+            'Przegląd odczytu' = $(if ($m.HasRead) { 'tak' } else { 'nie - bez przycisku odczytu' })
+            'Przyciski zmian'  = [int]$m.ChangeCount
+            'Testy zapisu'     = ($writes -join '; ')
+            Pokrycie           = $state
+            Klucz              = $m.Key
+            __flag             = $(switch ($state) { 'brak' { 'crit' } 'tylko odczyt' { 'warn' } default { '' } })
+        }
+    }
+}
+#endregion
+
 #region Pozostałości po testach (obiekty HT-Autotest-*)
 function Get-HTSelfTestLeftovers {
     # Obiekty testowe, które zostały (np. po przerwaniu programu w trakcie testu): grupy, konta gości, grupy pocztowe
@@ -220,6 +255,9 @@ function Get-HTSelfTestLeftovers {
         foreach ($g in @(Get-DistributionGroup -Filter "Name -like '$prefix*'" -ResultSize Unlimited -ErrorAction Stop)) {
             [PSCustomObject]@{ Obiekt = $g.DisplayName; Rodzaj = 'Grupa dystrybucyjna'; Usługa = 'Exchange'; Adres = "$($g.PrimarySmtpAddress)"; Id = "$($g.PrimarySmtpAddress)"; __kind = 'DistributionGroup' }
         }
+        foreach ($mb in @(Get-EXOMailbox -Filter "Name -like '$prefix*'" -ResultSize Unlimited -ErrorAction Stop)) {
+            [PSCustomObject]@{ Obiekt = $mb.DisplayName; Rodzaj = 'Skrzynka'; Usługa = 'Exchange'; Adres = "$($mb.PrimarySmtpAddress)"; Id = "$($mb.PrimarySmtpAddress)"; __kind = 'Mailbox' }
+        }
         foreach ($g in @(Get-DynamicDistributionGroup -Filter "Name -like '$prefix*'" -ResultSize Unlimited -ErrorAction Stop)) {
             [PSCustomObject]@{ Obiekt = $g.DisplayName; Rodzaj = 'Grupa dynamiczna'; Usługa = 'Exchange'; Adres = "$($g.PrimarySmtpAddress)"; Id = "$($g.PrimarySmtpAddress)"; __kind = 'DynamicGroup' }
         }
@@ -241,6 +279,7 @@ function Remove-HTSelfTestLeftover {
         'DeletedItem' { Invoke-HTGraphRequest -Uri "directory/deletedItems/$($Item.Id)" -Method DELETE | Out-Null }
         'DistributionGroup' { Remove-HTMailDistributionGroup -Identity $Item.Id }
         'DynamicGroup' { Remove-HTDynamicGroup -Identity $Item.Id }
+        'Mailbox' { Remove-Mailbox -Identity $Item.Id -Confirm:$false -ErrorAction Stop }
         'SPGroup' { Remove-HTSPGroup -Group $Item.Id }
         default { throw "Nieznany rodzaj obiektu: $($Item.__kind)" }
     }
@@ -330,8 +369,10 @@ Register-HTSelfTest -Key 'graph.users' -Name 'Lista kont i szczegóły konta' -S
     Assert-HTSelfTest $users.Count 'Lista kont jest pusta'
     $me = Get-HTSelfTestMe -Context $ctx
     $detail = Get-HTM365UserDetail -Id $me.Id
-    Assert-HTSelfTest ($detail.User.UserPrincipalName -eq $me.UserPrincipalName) 'Szczegóły konta nie zgadzają się z kontem'
-    return "Kont: $($users.Count); szczegóły $($me.UserPrincipalName): licencji $(@($detail.Licenses).Count), grup $(@($detail.Groups).Count), metod MFA $(@($detail.AuthMethods).Count)"
+    Assert-HTSelfTest ([string]$detail['UPN'] -eq $me.UserPrincipalName) "Szczegóły konta nie zgadzają się z kontem (UPN: «$($detail['UPN'])», oczekiwano $($me.UserPrincipalName))"
+    # Sekcje szczegółów z liczbą w nazwie, np. «Licencje (2)», «Metody MFA (3)», «Grupy (5)»
+    $sections = @($detail.Keys | Where-Object { $_ -match '^(Licencje|Metody MFA|Grupy) \(\d+\)$' })
+    return "Kont: $($users.Count); szczegóły $($me.UserPrincipalName): $($sections -join ', ')"
 }
 
 Register-HTSelfTest -Key 'graph.licenses' -Name 'Licencje tenanta' -Service 'Graph' -Area 'Licencje' -Test {
@@ -426,7 +467,7 @@ Register-HTSelfTest -Key 'graph.intune' -Name 'Urządzenia Intune' -Service 'Gra
 #endregion
 
 #region Testy: Microsoft 365 (Graph) - zapis na obiektach testowych
-Register-HTSelfTest -Key 'graph.w.secgroup' -Name 'Grupa zabezpieczeń: utwórz, zmień, członkowie, usuń' -Service 'Graph' -Mode 'Write' -Area 'Grupy' -Test {
+Register-HTSelfTest -Key 'graph.w.secgroup' -Modules @('grp.manage', 'grp.members', 'grp.owners', 'org.newgroup', 'grp.details') -Name 'Grupa zabezpieczeń: utwórz, zmień, członkowie, usuń' -Service 'Graph' -Mode 'Write' -Area 'Grupy' -Test {
     param($ctx)
     $me = Get-HTSelfTestMe -Context $ctx
     $name = Get-HTSelfTestName -Context $ctx -Suffix 'Grupa'
@@ -450,7 +491,7 @@ Register-HTSelfTest -Key 'graph.w.secgroup' -Name 'Grupa zabezpieczeń: utwórz,
     return "$name - $($steps -join ', '); grupa usuwana po teście"
 }
 
-Register-HTSelfTest -Key 'graph.w.grouplicense' -Name 'Licencja grupowa: przypisz i usuń (grupa bez członków)' -Service 'Graph' -Mode 'Write' -Area 'Licencje' -Test {
+Register-HTSelfTest -Key 'graph.w.grouplicense' -Modules @('grp.licenses') -Name 'Licencja grupowa: przypisz i usuń (grupa bez członków)' -Service 'Graph' -Mode 'Write' -Area 'Licencje' -Test {
     param($ctx)
     $sku = @(Get-HTSubscribedSkus -Force | Where-Object { $_.Status -eq 'Enabled' -and $_.Enabled -gt 0 } | Sort-Object Available -Descending)[0]
     if (-not $sku) { Skip-HTSelfTest 'Brak aktywnych subskrypcji do testu licencji grupowej.' }
@@ -469,13 +510,13 @@ Register-HTSelfTest -Key 'graph.w.grouplicense' -Name 'Licencja grupowa: przypis
     return "$name - przypisano i usunięto $(Get-HTSkuFriendlyName $sku.SkuPartNumber) (grupa bez członków - licencje nie są zużywane)"
 }
 
-Register-HTSelfTest -Key 'graph.w.guest' -Name 'Zaproszenie gościa bez e-maila (example.com)' -Service 'Graph' -Mode 'Write' -Area 'Goście' -Test {
+Register-HTSelfTest -Key 'graph.w.guest' -Modules @('org.guest') -Name 'Zaproszenie gościa bez e-maila (example.com)' -Service 'Graph' -Mode 'Write' -Area 'Goście' -Test {
     param($ctx)
     $name = Get-HTSelfTestName -Context $ctx -Suffix 'Gosc'
     $email = "$($name.ToLowerInvariant())@example.com"
     try { $inv = New-HTM365GuestInvitation -Email $email -DisplayName $name -SendInvitation $false }
     catch {
-        if ("$($_.Exception.Message)" -match 'domain.*(block|not allowed|denied)|collaboration|B2B') { Skip-HTSelfTest "Zasady współpracy zewnętrznej blokują zaproszenie do example.com: $($_.Exception.Message)" }
+        if ("$($_.Exception.Message)" -match '(?i)invitations? not allowed|not allowed for your company|domain.*(block|not allowed|denied)|collaboration|B2B|współpracy') { Skip-HTSelfTest "Zaproszenia gości są wyłączone albo ograniczone w tym tenancie (Entra ID > Identities zewnętrzne > Ustawienia współpracy zewnętrznej). $($_.Exception.Message)" }
         throw
     }
     Assert-HTSelfTest $inv.UserId 'Zaproszenie nie zwróciło konta gościa'
@@ -488,7 +529,7 @@ Register-HTSelfTest -Key 'graph.w.guest' -Name 'Zaproszenie gościa bez e-maila 
     return "Zaproszono $email (bez wysyłki e-maila), stan: $($inv.Status); konto gościa usuwane po teście"
 }
 
-Register-HTSelfTest -Key 'graph.w.team' -Name 'Grupa Microsoft 365 → zespół Teams → kanał' -Service 'Graph' -Mode 'Write' -Area 'Teams' -Slow `
+Register-HTSelfTest -Key 'graph.w.team' -Modules @('grp.team', 'm365.teams') -Name 'Grupa Microsoft 365 → zespół Teams → kanał' -Service 'Graph' -Mode 'Write' -Area 'Teams' -Slow `
     -Description 'Replikacja grupy do Teams trwa do kilku minut.' -Test {
     param($ctx)
     $me = Get-HTSelfTestMe -Context $ctx
@@ -543,7 +584,7 @@ Register-HTSelfTest -Key 'exo.config' -Name 'Konfiguracja organizacji Exchange' 
     return "Domen akceptowanych: $($domains.Count); organizacja: $($org.DisplayName)"
 }
 
-Register-HTSelfTest -Key 'exo.w.distgroup' -Name 'Grupa dystrybucyjna: utwórz, członek, usuń' -Service 'Exchange' -Mode 'Write' -Area 'Grupy' -Test {
+Register-HTSelfTest -Key 'exo.w.distgroup' -Modules @('exo.dl', 'org.newgroup') -Name 'Grupa dystrybucyjna: utwórz, członek, usuń' -Service 'Exchange' -Mode 'Write' -Area 'Grupy' -Test {
     param($ctx)
     $member = Get-HTSelfTestMailbox -Context $ctx
     $domain = Get-HTSelfTestDomain -Context $ctx
@@ -557,7 +598,7 @@ Register-HTSelfTest -Key 'exo.w.distgroup' -Name 'Grupa dystrybucyjna: utwórz, 
     return "$created - utworzono (ukryta w GAL), członek $member dodany i usunięty; grupa usuwana po teście"
 }
 
-Register-HTSelfTest -Key 'exo.w.dyngroup' -Name 'Grupa dynamiczna: utwórz z filtrem, członkowie, usuń' -Service 'Exchange' -Mode 'Write' -Area 'Grupy' -Test {
+Register-HTSelfTest -Key 'exo.w.dyngroup' -Modules @('exo.dyn', 'org.newgroup') -Name 'Grupa dynamiczna: utwórz z filtrem, członkowie, usuń' -Service 'Exchange' -Mode 'Write' -Area 'Grupy' -Test {
     param($ctx)
     $domain = Get-HTSelfTestDomain -Context $ctx
     $name = Get-HTSelfTestName -Context $ctx -Suffix 'DDG'
@@ -570,6 +611,79 @@ Register-HTSelfTest -Key 'exo.w.dyngroup' -Name 'Grupa dynamiczna: utwórz z fil
 }
 #endregion
 
+#region Testy zapisu: konto i skrzynka współdzielona
+Register-HTSelfTest -Key 'graph.w.user' -Name 'Konto: utwórz, dane, hasło, blokada, przełożony, usuń' -Service 'Graph' -Mode 'Write' -Area 'Konta' `
+    -Modules @('m365.new', 'm365.edit', 'm365.password', 'm365.block', 'm365.manager', 'm365.details', 'm365.deleted') -Test {
+    param($ctx)
+    $me = Get-HTSelfTestMe -Context $ctx
+    $domain = @(Get-HTM365Domains)[0]
+    if (-not $domain) { throw 'Brak zweryfikowanej domeny do UPN konta testowego' }
+    $name = Get-HTSelfTestName -Context $ctx -Suffix 'Konto'
+    $upn = "$($name.ToLowerInvariant())@$domain"
+    $u = New-HTM365User -DisplayName $name -UserPrincipalName $upn -Password (New-Password -Length 16 -StartWithLetter $true) -AccountEnabled $false -UsageLocation 'PL' -Department 'HT-Autotest'
+    Add-HTSelfTestCleanup -Context $ctx -Name "Usunięcie konta $upn" -Action {
+        Remove-HTM365User -Id $u.id
+        try { Remove-HTM365DeletedUser -Id $u.id } catch { Write-Verbose "Kosz katalogu: $($_.Exception.Message)" }
+    }.GetNewClosure()
+    $steps = @('utworzono (zablokowane)')
+    Wait-HTSelfTestCondition -Context $ctx -Message 'Nowe konto niewidoczne' -Condition { Invoke-HTGraphRequest -Uri "users/$($u.id)?`$select=id" } | Out-Null
+    Set-HTM365UserContact -Id $u.id -Properties @{ jobTitle = 'Autotest'; city = 'Warszawa' }
+    Wait-HTSelfTestCondition -Context $ctx -Message 'Dane kontaktowe nie zapisały się' -Condition { (Invoke-HTGraphRequest -Uri "users/$($u.id)?`$select=jobTitle").jobTitle -eq 'Autotest' } | Out-Null
+    $steps += 'dane kontaktowe'
+    Reset-HTM365UserPassword -Id $u.id -Password (New-Password -Length 16 -StartWithLetter $true) -ForceChange $true
+    $steps += 'reset hasła'
+    Set-HTM365UserEnabled -Id $u.id -Enabled $false -RevokeSessions $true
+    Assert-HTSelfTest (-not (Invoke-HTGraphRequest -Uri "users/$($u.id)?`$select=accountEnabled").accountEnabled) 'Konto nie jest zablokowane'
+    $steps += 'blokada z wylogowaniem'
+    Set-HTM365UserManager -Id $u.id -ManagerId $me.Id
+    Wait-HTSelfTestCondition -Context $ctx -Message 'Przełożony nie zapisał się' -Condition { [string](Get-HTM365UserManager -Id $u.id).id -eq $me.Id } | Out-Null
+    Remove-HTM365UserManager -Id $u.id
+    $steps += 'przełożony ustawiony i usunięty'
+    $detail = Get-HTM365UserDetail -Id $u.id
+    Assert-HTSelfTest ([string]$detail['UPN'] -eq $upn) 'Szczegóły nowego konta nie zgadzają się'
+    $steps += 'szczegóły'
+    return "$upn - $($steps -join ', '); konto usuwane po teście (także z kosza)"
+}
+
+Register-HTSelfTest -Key 'exo.w.shared' -Name 'Skrzynka współdzielona: uprawnienia z listy, kopie wysłanych, autoodpowiedź, usuń' -Service 'Exchange' -Mode 'Write' -Area 'Poczta' `
+    -Modules @('exo.newmailbox', 'exo.perms', 'exo.autoreply', 'exo.details', 'exo.settings') -Test {
+    param($ctx)
+    $member = Get-HTSelfTestMailbox -Context $ctx
+    $domain = Get-HTSelfTestDomain -Context $ctx
+    $name = Get-HTSelfTestName -Context $ctx -Suffix 'SM'
+    $address = New-HTResourceMailbox -Type Shared -DisplayName $name -Address "$($name.ToLowerInvariant())@$domain"
+    $state = @{ ObjectId = '' }
+    Add-HTSelfTestCleanup -Context $ctx -Name "Usunięcie skrzynki $address" -Action {
+        Remove-Mailbox -Identity $address -Confirm:$false -ErrorAction Stop
+        # Konto skrzynki trafia do kosza katalogu - trwałe usunięcie, gdy jest połączenie z Microsoft 365
+        if ($state.ObjectId -and $Global:ConnectedToGraphAPI) { try { Remove-HTM365DeletedUser -Id $state.ObjectId } catch { Write-Verbose "Kosz katalogu: $($_.Exception.Message)" } }
+    }.GetNewClosure()
+    $mbx = Wait-HTSelfTestCondition -Context $ctx -TimeoutSeconds 180 -IntervalSeconds 10 -Message 'Nowa skrzynka niewidoczna' -Condition { Get-EXOMailbox -Identity $address -ErrorAction Stop }
+    $state.ObjectId = [string]$mbx.ExternalDirectoryObjectId
+    Invoke-HTWithRetry { Set-HTMailboxHiddenFromGAL -Identity $address -Hidden $true }
+    $steps = @('utworzono (ukryta w GAL)')
+    $entry = @(ConvertFrom-HTMailboxPermissionLines -Text "$member; pełny, jako, w imieniu; nie")[0]
+    Assert-HTSelfTest (-not $entry.Problem) "Lista uprawnień: $($entry.Problem)"
+    Invoke-HTWithRetry { Add-HTMailboxPermission -Identity $address -User $member -Type $entry.Types -AutoMapping $entry.AutoMapping }
+    $types = Wait-HTSelfTestCondition -Context $ctx -TimeoutSeconds 90 -Message 'Nie widać wszystkich uprawnień' -Condition {
+        $t = @(Get-HTMailboxPermissions -Identity $address | ForEach-Object { $_.Type } | Select-Object -Unique)
+        if ($t -contains 'FullAccess' -and $t -contains 'SendAs' -and $t -contains 'SendOnBehalf') { $t }
+    }
+    $steps += "uprawnienia z listy: $(@($types) -join ', ') (bez automapowania)"
+    Set-HTMailboxSentItemsCopy -Identity $address
+    $copy = Wait-HTSelfTestCondition -Context $ctx -Message 'Kopie wysłanych nie włączyły się' -Condition { $c = Get-HTMailboxSentItemsCopy -Identity $address; if ($c.'Kopia wysłanych «jako»' -and $c.'Kopia wysłanych «w imieniu»') { $c } }
+    $steps += 'kopie wysłanych przez delegatów'
+    Set-HTMailboxAutoReply -Identity $address -State Enabled -InternalMessage 'Autotest Helpdesk Tools' -ExternalMessage 'Autotest Helpdesk Tools'
+    Assert-HTSelfTest ("$((Get-HTMailboxAutoReply -Identity $address).AutoReplyState)" -eq 'Enabled') 'Autoodpowiedź nie włączyła się'
+    Clear-HTMailboxAutoReply -Identity $address
+    Assert-HTSelfTest ("$((Get-HTMailboxAutoReply -Identity $address).AutoReplyState)" -eq 'Disabled') 'Autoodpowiedź nie wyłączyła się'
+    $steps += 'autoodpowiedź włączona i wyczyszczona'
+    foreach ($t in 'SendOnBehalf', 'SendAs', 'FullAccess') { Remove-HTMailboxPermission -Identity $address -User $member -Type $t }
+    $steps += 'uprawnienia odebrane'
+    return "$address - $($steps -join ', '); skrzynka usuwana po teście"
+}
+#endregion
+
 #region Testy: SharePoint (połączona witryna)
 Register-HTSelfTest -Key 'spo.site' -Name 'Witryna, biblioteki i uprawnienia' -Service 'SharePoint' -Area 'SharePoint' -Test {
     $info = Get-HTSPSiteInfo
@@ -579,7 +693,7 @@ Register-HTSelfTest -Key 'spo.site' -Name 'Witryna, biblioteki i uprawnienia' -S
     return "$($info.'Tytuł') ($($info.Adres)): bibliotek $($libraries.Count), grup $($groups.Count), uprawnień biblioteki «$(if ($libraries.Count) { $libraries[0].Title })»: $($perms.Count)"
 }
 
-Register-HTSelfTest -Key 'spo.w.group' -Name 'Grupa SharePoint: utwórz i usuń' -Service 'SharePoint' -Mode 'Write' -Area 'SharePoint' -Test {
+Register-HTSelfTest -Key 'spo.w.group' -Modules @('sp.groups') -Name 'Grupa SharePoint: utwórz i usuń' -Service 'SharePoint' -Mode 'Write' -Area 'SharePoint' -Test {
     param($ctx)
     $name = Get-HTSelfTestName -Context $ctx -Suffix 'SP'
     New-HTSPGroup -Title $name -Description 'Autotest Helpdesk Tools - do usunięcia' | Out-Null
@@ -588,15 +702,14 @@ Register-HTSelfTest -Key 'spo.w.group' -Name 'Grupa SharePoint: utwórz i usuń'
     return "$name - utworzono w połączonej witrynie; grupa usuwana po teście"
 }
 
-Register-HTSelfTest -Key 'spo.w.folder' -Name 'Folder w bibliotece: utwórz i usuń' -Service 'SharePoint' -Mode 'Write' -Area 'SharePoint' -Test {
+Register-HTSelfTest -Key 'spo.w.folder' -Modules @('sp.newfolder', 'sp.perms') -Name 'Folder w bibliotece: utwórz i usuń' -Service 'SharePoint' -Mode 'Write' -Area 'SharePoint' -Test {
     param($ctx)
     $library = @(Get-HTSPLibraries | Sort-Object @{ Expression = { -not ([string]$_.ServerRelativeUrl -match '/Shared Documents$') } })[0]
     if (-not $library) { Skip-HTSelfTest 'Brak biblioteki dokumentów w połączonej witrynie.' }
     $name = Get-HTSelfTestName -Context $ctx -Suffix 'Folder'
     $folder = New-HTSPFolder -ParentNode $library -Name $name
-    $parent = ConvertTo-HTSPSiteRelativeUrl -ServerRelativeUrl $library.ServerRelativeUrl
-    Add-HTSelfTestCleanup -Context $ctx -Name "Usunięcie folderu $name" -Action { Remove-PnPFolder -Name $name -Folder $parent -Force -ErrorAction Stop }.GetNewClosure()
-    Assert-HTSelfTest (@(Get-HTSPSubFolders -ServerRelativeUrl $library.ServerRelativeUrl -ListTitle $library.ListTitle | Where-Object { $_.Title -eq $name }).Count) 'Nowy folder nie jest widoczny'
+    Add-HTSelfTestCleanup -Context $ctx -Name "Usunięcie folderu $name" -Action { Remove-HTSPFolder -Node $folder -Permanent }.GetNewClosure()
+    Assert-HTSelfTest (@(Get-HTSPSubFolders -ServerRelativeUrl $library.ServerRelativeUrl -ListTitle $library.ListTitle -ListId (Get-HTSPListId -Node $library) | Where-Object { $_.Title -eq $name }).Count) 'Nowy folder nie jest widoczny'
     return "$($folder.ServerRelativeUrl) - utworzono w «$($library.Title)»; folder usuwany po teście (bez kosza)"
 }
 #endregion

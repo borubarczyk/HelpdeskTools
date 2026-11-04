@@ -1066,7 +1066,7 @@ function New-HTDialog {
     }
     $ok.add_Click($script:DialogEvents.Ok)
     $cancel.add_Click($script:DialogEvents.Cancel)
-    $w.Tag = @{ Result = $false; Modal = $false; Validate = $Validate }
+    $w.Tag = @{ Result = $false; Modal = $false; Validate = $Validate; Tone = $Tone }
     return $w
 }
 
@@ -1074,6 +1074,14 @@ function Invoke-HTDialog {
     # Pokazuje okno modalnie nad oknem głównym; zwraca $true, gdy zatwierdzono
     param([Parameter(Mandatory)][System.Windows.Window]$Window)
     if (-not ($Window.Tag -is [hashtable])) { $Window.Tag = @{} }
+    # Przegląd modułów (autotest): okno nie pokazuje się - zapis treści i odpowiedź «Anuluj» (bez zmian)
+    if ($null -ne $script:UI.DialogCapture -and -not $Window.Tag['LockScreen']) {
+        $texts = @('dlgSubtitle', 'msgText') | ForEach-Object { $Window.FindName($_) } | Where-Object { $_ -and $_.Text } | ForEach-Object { [string]$_.Text }
+        $script:UI.DialogCapture.Add([PSCustomObject]@{ Title = [string]$Window.Title; Text = ($texts -join ' '); Tone = [string]$Window.Tag['Tone'] })
+        $Window.Tag['Result'] = $false
+        try { $Window.Close() } catch { Write-Verbose $_ }
+        return $false
+    }
     # Program zablokowany: okno (inne niż ekran PIN) pokaże się dopiero po odblokowaniu
     if ($script:LockState.Locked -and -not $Window.Tag['LockScreen']) { Wait-HTUnlocked }
     # Program zamykany awaryjnie z ekranu blokady: kolejne okna już się nie pokazują
@@ -2019,6 +2027,7 @@ $script:Clipboard = @{ Secret = $null; Timer = $null }
 function Show-HTToast {
     # Krótkie powiadomienie w prawym dolnym rogu okna (znika samo)
     param([Parameter(Mandatory)][string]$Text, [ValidateSet('info', 'ok', 'warn', 'crit')][string]$Tone = 'info', [int]$Seconds = 5)
+    if ($null -ne $script:UI.DialogCapture) { $script:UI.DialogCapture.Add([PSCustomObject]@{ Title = 'Powiadomienie'; Text = $Text; Tone = $(if ($Tone -eq 'crit') { 'crit' } else { "toast-$Tone" }) }); return }
     $toastHost = $script:UI.Controls['toastHost']
     if (-not $toastHost) { return }
     try {
@@ -3060,6 +3069,23 @@ function Initialize-HTModule {
 }
 
 function Get-HTActiveModule { return $script:UI.ActiveModule }
+
+function Get-HTModuleDefinitions { return @($script:UI.ModuleDefs) }
+
+function Get-HTModuleInstance {
+    # Moduł (zbudowany - bez pokazywania, gdy jeszcze nie był otwierany)
+    param([Parameter(Mandatory)][string]$Key)
+    $m = $script:UI.Modules[$Key]
+    if (-not $m) { $d = Get-HTModuleDefinition $Key; if ($d) { $m = Initialize-HTModule -Definition $d } }
+    return $m
+}
+
+function Get-HTWorkspaceTitle {
+    param([string]$Key)
+    $ws = $script:UI.Workspaces[$Key]
+    if ($ws) { return [string]$ws.Title }
+    return $Key
+}
 #endregion
 
 #region Lista obiektów (lewy panel): zaznaczanie, wyszukiwanie, wczytywanie z listy
@@ -3468,6 +3494,43 @@ function Get-HTChangeTargets {
 function Get-HTPanel([string]$Key) { return $script:UI.Panels[$Key] }
 
 # Drzewo (SharePoint): węzły z polem wyboru; Tag węzła = obiekt
+# Shift + kliknięcie pola wyboru w drzewie: zakres elementów tego samego poziomu od ostatnio klikniętego
+$script:TreeCheckEvents = @{
+    Click = {
+        param($s, $e)
+        try {
+            $node = $s.Parent.Parent
+            if ($node -isnot [System.Windows.Controls.TreeViewItem]) { return }
+            $last = $script:TreeLastChecked
+            $shift = ([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Shift) -ne 0
+            if ($shift -and $last -and -not [object]::ReferenceEquals($last, $node) -and [object]::ReferenceEquals($last.Parent, $node.Parent)) {
+                $items = @($node.Parent.Items)
+                $a = [array]::IndexOf($items, $last)
+                $b = [array]::IndexOf($items, $node)
+                if ($a -ge 0 -and $b -ge 0) {
+                    foreach ($i in ([Math]::Min($a, $b))..([Math]::Max($a, $b))) {
+                        $item = $items[$i]
+                        if ($item -is [System.Windows.Controls.TreeViewItem] -and $item.Header -is [System.Windows.Controls.Panel]) {
+                            $box = $item.Header.Children[0]
+                            if ($box -is [System.Windows.Controls.CheckBox]) { $box.IsChecked = $s.IsChecked }
+                        }
+                    }
+                }
+            }
+            $script:TreeLastChecked = $node
+        }
+        catch { Write-Verbose "Zaznaczanie zakresu w drzewie: $_" }
+    }
+}
+
+function Remove-HTTreeItem {
+    # Usunięcie z drzewa węzłów, których obiektem (Tag) jest -Item (np. po usunięciu folderu)
+    param([Parameter(Mandatory)][hashtable]$Panel, [Parameter(Mandatory)][object]$Item)
+    foreach ($n in @(Get-HTTreeNodes -Panel $Panel)) {
+        if ([object]::ReferenceEquals($n.Tag, $Item) -and $n.Parent -is [System.Windows.Controls.ItemsControl]) { $n.Parent.Items.Remove($n) }
+    }
+}
+
 function New-HTTreeItem {
     param([Parameter(Mandatory)][object]$Item, [string]$Text, [string]$Icon = 'E8B7', [switch]$Lazy)
     $node = New-Object System.Windows.Controls.TreeViewItem
@@ -3476,6 +3539,8 @@ function New-HTTreeItem {
     $cb = New-Object System.Windows.Controls.CheckBox
     $cb.Focusable = $false
     $cb.Margin = '0,0,8,0'
+    $cb.ToolTip = 'Shift + kliknięcie - zaznacza (albo odznacza) wszystkie elementy pomiędzy, na tym samym poziomie'
+    $cb.add_Click($script:TreeCheckEvents.Click)
     [void]$sp.Children.Add($cb)
     $glyph = New-HTGlyphBlock -Code $Icon -Size 13 -Color '#8CB0FF'
     $glyph.Margin = '0,0,8,0'
@@ -3705,6 +3770,8 @@ function New-HTModuleView {
     $Module.ParamsStack = $Module.View_['paramsStack']
     $Module.StatsGrid = $Module.View_['statsGrid']
     $Module.Grid = $Module.View_['grid']
+    # Ctrl+C z nagłówkami: nazwa kolumny zamiast elementu nagłówka (nazwa + lejek filtra)
+    if ($Module.Grid) { $Module.Grid.add_CopyingRowClipboardContent($script:GridCopyEvents.CopyRow) }
     $Module.FilterBox = $Module.View_['filterBox']
 
     $root.FindName('hdrIcon').Text = Get-HTGlyph $Module.Icon
@@ -4858,6 +4925,31 @@ $script:ColumnHeaderEvents = @{
         }
         catch { Write-Log -Message "Filtr kolumny: $($_.Exception.Message)" -Type 'Error' }
     }
+}
+
+$script:GridCopyEvents = @{
+    CopyRow = {
+        param($s, $e)
+        try {
+            if (-not $e.IsColumnHeadersRow) { return }
+            for ($i = 0; $i -lt $e.ClipboardRowContent.Count; $i++) {
+                $c = $e.ClipboardRowContent[$i]
+                $text = Get-HTColumnHeaderText -Column $c.Column
+                $e.ClipboardRowContent[$i] = New-Object System.Windows.Controls.DataGridClipboardCellContent($c.Item, $c.Column, $text)
+            }
+        }
+        catch { Write-Verbose "Kopiowanie nagłówków: $_" }
+    }
+}
+
+function Get-HTColumnHeaderText {
+    # Tekst nagłówka kolumny tabeli wyników (nagłówek to element: nazwa + lejek filtra)
+    param([Parameter(Mandatory)]$Column)
+    if ($Column.SortMemberPath) { return [string]$Column.SortMemberPath }
+    if ($Column.Header -is [string]) { return $Column.Header }
+    $t = @($Column.Header.Children | Where-Object { $_ -is [System.Windows.Controls.TextBlock] })[0]
+    if ($t) { return [string]$t.Text }
+    return [string]$Column.Header
 }
 
 function New-HTColumnHeader {
@@ -7880,5 +7972,171 @@ function Restart-HTApplication {
     Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $arguments
     $Global:HTRestarting = $true
     if ($script:UI.Window) { $script:UI.Window.Close() }
+}
+#endregion
+
+#region Przegląd wszystkich sekcji (autotest interfejsu)
+<#
+    Tryb przechwytywania okien: Invoke-HTDialog nie pokazuje okna, tylko zapisuje tytuł, treść i ton (crit / warn / info)
+    i odpowiada «Anuluj». Każde pytanie o zmianę (Confirm-HTChange, Show-HTConfirm), formularz i wybór z listy kończy się
+    więc rezygnacją - przegląd niczego nie zmienia. Powiadomienia (toast) też są zapisywane zamiast pokazywane.
+#>
+function Start-HTDialogCapture { $script:UI.DialogCapture = New-Object System.Collections.Generic.List[object] }
+
+function Stop-HTDialogCapture {
+    $captured = if ($null -ne $script:UI.DialogCapture) { $script:UI.DialogCapture.ToArray() } else { @() }
+    $script:UI.DialogCapture = $null
+    return $captured
+}
+
+function Test-HTDialogCapture { return ($null -ne $script:UI.DialogCapture) }
+
+function Select-HTPanelSample {
+    <#
+        Przykładowy obiekt na liście po lewej do przeglądu modułów: -Prefer { param($o) } - obiekt preferowany (np. własne
+        konto), inaczej pierwszy. Lista pusta - próba wczytania. Zwraca opis wybranego obiektu albo $null (brak obiektów).
+        Zaznaczenie użytkownika (pola wyboru) jest zapamiętywane w -State i przywracane przez Restore-HTPanelSelection.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Panel, [scriptblock]$Prefer = $null, [hashtable]$State = @{})
+    $empty = if ($Panel.IsTree) { $Panel.pTree.Items.Count -eq 0 } else { $Panel.Table.Rows.Count -eq 0 }
+    if ($empty -and $Panel.Loader -and (-not $Panel.Service -or (Test-HTConnection -Service $Panel.Service))) { Invoke-HTPanelLoad -Panel $Panel -Quiet }
+    if ($Panel.IsTree) {
+        $items = @($Panel.pTree.Items | Where-Object { $_ -is [System.Windows.Controls.TreeViewItem] -and $_.Tag -and $_.Tag -isnot [string] })
+        if (-not $items.Count) { return $null }
+        $pick = $null
+        if ($Prefer) { $pick = @($items | Where-Object { try { & $Prefer $_.Tag } catch { $false } })[0] }
+        if (-not $pick) { $pick = $items[0] }
+        $State[$Panel.Key] = @{ Tree = $Panel.pTree.SelectedItem }
+        $pick.IsSelected = $true
+        return [string]$pick.Tag.Title
+    }
+    if ($Panel.Table.Rows.Count -eq 0) { return $null }
+    if (-not $State.ContainsKey($Panel.Key)) { $State[$Panel.Key] = @{ Sel = @($Panel.Table.Select('Sel = true') | ForEach-Object { [string]$_['Key'] }) } }
+    $key = $null
+    if ($Prefer) { foreach ($k in @($Panel.Objects.Keys)) { if ((& { try { & $Prefer $Panel.Objects[$k] } catch { $false } })) { $key = [string]$k; break } } }
+    if (-not $key) { $key = [string]$Panel.Table.Rows[0]['Key'] }
+    foreach ($r in $Panel.Table.Rows) { $r['Sel'] = ([string]$r['Key'] -eq $key) }
+    $row = @($Panel.Table.Select("Key = '$($key.Replace("'", "''"))'"))[0]
+    return $(if ($row) { [string]$row['Title'] } else { $key })
+}
+
+function Restore-HTPanelSelection {
+    # Przywrócenie zaznaczenia list sprzed przeglądu modułów
+    param([hashtable]$State = @{})
+    foreach ($k in @($State.Keys)) {
+        $p = $script:UI.Panels[$k]
+        if (-not $p) { continue }
+        if ($p.IsTree) { if ($State[$k].Tree) { try { $State[$k].Tree.IsSelected = $true } catch { Write-Verbose $_ } }; continue }
+        $sel = @($State[$k].Sel)
+        foreach ($r in $p.Table.Rows) { $r['Sel'] = ($sel -contains [string]$r['Key']) }
+    }
+}
+
+function Invoke-HTModuleSweep {
+    <#
+        Przegląd modułów: dla każdego modułu wybranych przestrzeni - otwarcie (zbudowanie), przykładowy obiekt na liście po
+        lewej (-Preferences: klucz listy -> { param($o) } wybór obiektu, np. własne konto) i główny przycisk odczytu
+        (niebieski, F5 - zawsze bez zmian). Okna są przechwytywane (Start-HTDialogCapture), więc nic się nie zmienia.
+        Wynik dla modułu: OK (z liczbą wyników), Uwaga (komunikat - np. moduł wymaga danych), Błąd (wyjątek, błąd w dzienniku,
+        wiersz «Błąd» w wynikach) albo Pominięto (brak połączenia, pusta lista, brak przycisku odczytu, brak dostępu).
+        -OnResult { param($row) }, -OnStart { param($definition, $index, $total) }, -ShouldStop { }.
+    #>
+    param(
+        [string[]]$Workspaces = @(),
+        [string[]]$ExcludeKeys = @(),
+        [hashtable]$Preferences = @{},
+        [scriptblock]$OnStart = $null,
+        [scriptblock]$OnResult = $null,
+        [scriptblock]$ShouldStop = $null
+    )
+    $defs = @($script:UI.ModuleDefs | Where-Object { (-not $Workspaces.Count -or $Workspaces -contains $_.Workspace) -and $ExcludeKeys -notcontains $_.Key })
+    $returnTo = if ($script:UI.ActiveModule) { $script:UI.ActiveModule.Key } else { '' }
+    $selection = @{}
+    $samples = @{}
+    if (-not $script:UI.SweepSink) {
+        Register-HTLogSink -ScriptBlock { param($entry) if ($null -ne $script:UI.SweepLog -and $entry.Type -eq 'Error') { $script:UI.SweepLog.Add([string]$entry.Message) } }
+        $script:UI.SweepSink = $true
+    }
+    $results = New-Object System.Collections.Generic.List[object]
+    $index = 0
+    try {
+        foreach ($d in $defs) {
+            $index++
+            if ($ShouldStop -and (& $ShouldStop)) { break }
+            if ($OnStart) { & $OnStart $d $index $defs.Count }
+            $ws = $script:UI.Workspaces[$d.Workspace]
+            $service = if ($d.Service) { $d.Service } elseif ($ws) { $ws.Service } else { '' }
+            $status = 'OK'
+            $details = ''
+            $sample = ''
+            $started = Get-Date
+            $m = $null
+            if (-not (Test-HTModuleAllowed $d.Key)) { $status = 'Pominięto'; $details = 'Brak dostępu dla konta programu (MFA)' }
+            elseif ($service -and -not (Test-HTConnection -Service $service)) { $status = 'Pominięto'; $details = "Brak połączenia: $service" }
+            else {
+                $script:UI.SweepLog = New-Object System.Collections.Generic.List[string]
+                Start-HTDialogCapture
+                try {
+                    if ($ws -and $ws.Panel) {
+                        $panel = $script:UI.Panels[$ws.Panel]
+                        if (-not $samples.ContainsKey($ws.Panel)) { $samples[$ws.Panel] = if ($panel) { Select-HTPanelSample -Panel $panel -Prefer $Preferences[$ws.Panel] -State $selection } else { $null } }
+                        $sample = [string]$samples[$ws.Panel]
+                    }
+                    Show-HTModule -Key $d.Key
+                    $m = $script:UI.Modules[$d.Key]
+                    if ($ws -and $ws.Panel -and -not $sample) { $status = 'Pominięto'; $details = 'Lista obiektów po lewej jest pusta' }
+                    elseif (-not $m -or -not $m.PrimaryButton) { $status = 'Pominięto'; $details = 'Moduł bez przycisku odczytu (tylko tworzenie / zmiany - testy zapisu)' }
+                    else {
+                        $rowsBefore = if ($m.Table) { $m.Table.Rows.Count } else { 0 }
+                        Invoke-HTModulePrimary -Module $m
+                        Update-HTUi
+                        $rows = if ($m.Table) { $m.Table.Rows.Count } else { 0 }
+                        $errorRows = @()
+                        if ($m.Table -and $m.Table.Columns.Contains('Status')) {
+                            $errorRows = @($m.Table.Rows | Where-Object { [string]$_['Status'] -like 'Błąd*' } | ForEach-Object { if ($m.Table.Columns.Contains('Szczegóły')) { [string]$_['Szczegóły'] } else { 'wiersz z błędem' } })
+                        }
+                        $details = "wyników: $rows"
+                        if ($errorRows.Count) { $status = 'Błąd'; $details = "wiersze z błędem: $($errorRows.Count) - $(@($errorRows | Select-Object -First 2) -join ' | ')" }
+                    }
+                }
+                catch { $status = 'Błąd'; $details = $_.Exception.Message }
+                finally {
+                    $dialogs = @(Stop-HTDialogCapture)
+                    $logErrors = @($script:UI.SweepLog)
+                    $script:UI.SweepLog = $null
+                }
+                $crit = @($dialogs | Where-Object { $_.Tone -eq 'crit' })
+                $warn = @($dialogs | Where-Object { $_.Tone -eq 'warn' })
+                $other = @($dialogs | Where-Object { $_.Tone -notin 'crit', 'warn' })
+                if ($status -ne 'Błąd' -and ($crit.Count -or $logErrors.Count)) {
+                    $status = 'Błąd'
+                    $details = (@(@($crit | ForEach-Object { "$($_.Title): $($_.Text)" }) + @($logErrors) | Select-Object -First 2) -join ' | ')
+                }
+                elseif ($status -eq 'OK' -and $warn.Count) { $status = 'Uwaga'; $details = "$details; komunikat: $(@($warn | Select-Object -First 1 | ForEach-Object { "$($_.Title): $($_.Text)" }))" }
+                elseif ($status -eq 'OK' -and $other.Count) { $details = "$details; okno: $(@($other | Select-Object -First 1 | ForEach-Object { $_.Title }))" }
+            }
+            if (Get-Command -Name Compress-HTErrorText -ErrorAction Ignore) { $details = Compress-HTErrorText -Text $details -MaxLength 600 }
+            $row = [PSCustomObject][ordered]@{
+                Test       = "$(if ($ws) { $ws.Title } else { $d.Workspace }) > $($d.Title)"
+                Usługa     = $(if ($service) { $service } else { 'bez usługi' })
+                Rodzaj     = 'odczyt (przegląd modułu)'
+                Obszar     = $d.Category
+                Status     = $status
+                'Czas (s)' = [Math]::Round(((Get-Date) - $started).TotalSeconds, 1)
+                Szczegóły  = $(if ($sample) { "obiekt: $sample; $details" } else { $details })
+                Klucz      = $d.Key
+                __flag     = $(switch ($status) { 'Błąd' { 'crit' } 'Uwaga' { 'warn' } 'Pominięto' { 'muted' } default { '' } })
+            }
+            $results.Add($row)
+            if ($OnResult) { & $OnResult $row }
+        }
+    }
+    finally {
+        if (Test-HTDialogCapture) { [void](Stop-HTDialogCapture) }
+        $script:UI.SweepLog = $null
+        Restore-HTPanelSelection -State $selection
+        if ($returnTo) { try { Show-HTModule -Key $returnTo } catch { Write-Verbose $_ } }
+    }
+    return $results.ToArray()
 }
 #endregion

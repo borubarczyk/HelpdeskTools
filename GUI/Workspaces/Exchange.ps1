@@ -146,7 +146,7 @@ Register-HTModule -Workspace 'Exchange' -Category 'Skrzynka' -Key 'exo.mobile' -
 
 #region Uprawnienia
 Register-HTModule -Workspace 'Exchange' -Category 'Uprawnienia' -Key 'exo.perms' -Title 'Uprawnienia do skrzynki' -Icon 'E8D7' `
-    -Description 'Pełny dostęp, Wyślij jako i Wyślij w imieniu. Prawy przycisk na wierszu - odebranie uprawnienia.' -Build {
+    -Description 'Pełny dostęp, Wyślij jako i Wyślij w imieniu - także wiele osób naraz z różnymi uprawnieniami i automapowaniem (lista albo CSV). Kopie wiadomości wysłanych przez delegatów w Elementach wysłanych skrzynki. Prawy przycisk na wierszu - odebranie uprawnienia.' -Build {
     param($m)
     $row = Add-HTToolbarRow -Module $m
     Add-HTButton -Parent $row -Module $m -Text 'Pokaż uprawnienia' -Icon 'E8A1' -Primary -OnClick {
@@ -166,6 +166,7 @@ Register-HTModule -Workspace 'Exchange' -Category 'Uprawnienia' -Key 'exo.perms'
             @{ Name = 'AutoMap'; Label = 'Automatyczne dodanie skrzynki w Outlooku (AutoMapping)'; Type = 'Check'; Default = $true }
             @{ Name = 'SendAs'; Label = 'Wyślij jako (SendAs)'; Type = 'Check' }
             @{ Name = 'OnBehalf'; Label = 'Wyślij w imieniu (SendOnBehalf)'; Type = 'Check' }
+            @{ Name = 'CopySent'; Label = 'Zapisuj kopie wysłanych przez delegatów w Elementach wysłanych skrzynki (przy «jako» / «w imieniu»)'; Type = 'Check'; Default = $true }
         )
         if (-not $form) { return }
         $users = @(Split-HTInputList $form.User)
@@ -177,7 +178,84 @@ Register-HTModule -Workspace 'Exchange' -Category 'Uprawnienia' -Key 'exo.perms'
         Invoke-HTTargetAction -Module $m -Name 'Nadanie uprawnień' -Targets $targets -Label { param($t) Get-HTMailboxLabel $t } -Action {
             param($t)
             foreach ($u in $users) { Add-HTMailboxPermission -Identity $t.PrimarySmtpAddress -User $u -Type $types -AutoMapping $form.AutoMap }
-            "$($types -join ', ') dla: $($users -join ', ')"
+            $copy = $form.CopySent -and ($types -contains 'SendAs' -or $types -contains 'SendOnBehalf')
+            if ($copy) { Set-HTMailboxSentItemsCopy -Identity $t.PrimarySmtpAddress }
+            "$($types -join ', ') dla: $($users -join ', ')$(if ($copy) { '; kopie wysłanych włączone' })"
+        }
+    } | Out-Null
+    Add-HTButton -Parent $row -Module $m -Text 'Nadaj z listy…' -Icon 'E8FD' -Create -ToolTip 'Wiele osób naraz, każda z innymi uprawnieniami i automapowaniem - lista «adres; uprawnienia; automapowanie» albo plik CSV' -OnClick {
+        param($m)
+        $targets = @(Get-HTChangeTargets -Module $m)
+        if ($targets.Count -eq 0) { return }
+        $prev = @{}
+        $get = { param($k, $d) if ($prev.Contains($k)) { $prev[$k] } else { $d } }
+        $addLines = { param($w, [string[]]$Lines) $box = $w.Tag.Controls['List'].Control; $box.Text = (@(([string]$box.Text).TrimEnd()) + @($Lines) | Where-Object { $_ }) -join "`r`n" }
+        while ($true) {
+            $form = Show-HTFormDialog -Title 'Nadaj uprawnienia z listy' -Icon 'E8D7' -OkText 'Dalej' -Width 720 -MaxHeight 720 `
+                -Description "Skrzynki: $($targets.Count). Jedna osoba w linii: adres; uprawnienia; automapowanie - np. «jan@firma.pl; pełny, jako; nie». Linia bez uprawnień - ustawienia domyślne poniżej." -Fields @(
+                @{ Name = 'List'; Label = 'Osoby (uprawnienia: pełny, jako, w imieniu, wszystkie; automapowanie: tak / nie)'; Type = 'Multiline'; Height = 200; Required = $true; Default = (& $get 'List' '') }
+                @{ Type = 'Buttons'; Buttons = @(
+                        @{ Text = 'Wybierz osoby…'; Icon = 'E716'; OnClick = { param($w) $picked = @(Select-HTRecipientAddress -Multiple -Title 'Osoby z dostępem do skrzynki' | Where-Object { $_ }); if ($picked.Count) { & $addLines $w $picked } }.GetNewClosure() }
+                        @{ Text = 'Wczytaj z CSV…'; Icon = 'E8E5'; OnClick = {
+                                param($w)
+                                $path = Select-HTOpenFile -Title 'Plik CSV: Uzytkownik; Uprawnienia; Automapowanie' -Filter 'CSV (*.csv)|*.csv'
+                                if (-not $path) { return }
+                                try { & $addLines $w @(ConvertFrom-HTMailboxPermissionCsv -Path $path) } catch { Show-HTError -Text 'Nie wczytano pliku CSV.' -ErrorObject $_ }
+                            }.GetNewClosure() }
+                    ) }
+                @{ Type = 'Header'; Label = 'Domyślnie (linie bez uprawnień)' }
+                @{ Name = 'DefFull'; Label = 'Pełny dostęp (FullAccess)'; Type = 'Check'; Default = (& $get 'DefFull' $true) }
+                @{ Name = 'DefSendAs'; Label = 'Wyślij jako (SendAs)'; Type = 'Check'; Default = (& $get 'DefSendAs' $false) }
+                @{ Name = 'DefOnBehalf'; Label = 'Wyślij w imieniu (SendOnBehalf)'; Type = 'Check'; Default = (& $get 'DefOnBehalf' $false) }
+                @{ Name = 'DefAuto'; Label = 'Automapowanie - skrzynka sama pojawi się w Outlooku'; Type = 'Check'; Default = (& $get 'DefAuto' $true) }
+                @{ Type = 'Header'; Label = 'Skrzynka' }
+                @{ Name = 'CopySent'; Label = 'Zapisuj kopie wiadomości wysłanych przez delegatów («jako» / «w imieniu») w Elementach wysłanych skrzynki'; Type = 'Check'; Default = (& $get 'CopySent' $true) }
+            )
+            if (-not $form) { return }
+            $prev = $form
+            $defaults = @()
+            if ($form.DefFull) { $defaults += 'FullAccess' }
+            if ($form.DefSendAs) { $defaults += 'SendAs' }
+            if ($form.DefOnBehalf) { $defaults += 'SendOnBehalf' }
+            $entries = @(ConvertFrom-HTMailboxPermissionLines -Text ([string]$form.List) -DefaultTypes $defaults -DefaultAutoMapping ([bool]$form.DefAuto))
+            $bad = @($entries | Where-Object { $_.Problem })
+            if ($entries.Count -and -not $bad.Count) { break }
+            Show-HTWarning -Title 'Nadaj uprawnienia z listy' -Text $(if (-not $entries.Count) { 'Lista jest pusta.' } else { "Popraw linie:`n`n" + (@($bad | Select-Object -First 25 | ForEach-Object { "$($_.Line) - $($_.Problem)" }) -join "`n") })
+        }
+        $copySent = [bool]$form.CopySent -and [bool]@($entries | Where-Object { $_.Types -contains 'SendAs' -or $_.Types -contains 'SendOnBehalf' }).Count
+        $pairs = @(foreach ($t in $targets) { foreach ($e in $entries) { [PSCustomObject]@{ Mailbox = $t; Entry = $e } } })
+        $summary = @(@("Skrzynki: $($targets.Count), osoby: $($entries.Count), operacji: $($pairs.Count)") +
+            @($entries | Select-Object -First 40 | ForEach-Object { "$($_.User): $(Get-HTMailboxPermissionLabel -Types $_.Types -AutoMapping $_.AutoMapping)" }) +
+            @($(if ($entries.Count -gt 40) { "… i $($entries.Count - 40) kolejnych" }), $(if ($copySent) { 'Kopie wiadomości wysłanych przez delegatów w Elementach wysłanych skrzynki: włączone' })) | Where-Object { $_ })
+        $copied = @{}
+        Invoke-HTTargetAction -Module $m -Name 'Nadanie uprawnień z listy' -Targets $pairs -Label { param($p) "$(Get-HTMailboxLabel $p.Mailbox) ← $($p.Entry.User)" } -Summary $summary -Action {
+            param($p)
+            $mailbox = [string]$p.Mailbox.PrimarySmtpAddress
+            Add-HTMailboxPermission -Identity $mailbox -User $p.Entry.User -Type $p.Entry.Types -AutoMapping $p.Entry.AutoMapping
+            $note = ''
+            if ($copySent -and -not $copied.ContainsKey($mailbox)) { Set-HTMailboxSentItemsCopy -Identity $mailbox; $copied[$mailbox] = $true; $note = '; kopie wysłanych włączone' }
+            [ordered]@{ Osoba = $p.Entry.User; Uprawnienia = (Get-HTMailboxPermissionLabel -Types $p.Entry.Types -AutoMapping $p.Entry.AutoMapping); Szczegóły = "Nadano$note" }
+        }
+    } | Out-Null
+    Add-HTButton -Parent $row -Module $m -Text 'Kopie wysłanych' -Icon 'E724' -ToolTip 'Czy wiadomości wysłane przez delegatów («jako» / «w imieniu») trafiają też do Elementów wysłanych skrzynki' -OnClick {
+        param($m)
+        Invoke-HTTargetQuery -Module $m -Name 'Kopie wysłanych przez delegatów' -Label { param($t) Get-HTMailboxLabel $t } -Action { param($t) Get-HTMailboxSentItemsCopy -Identity $t.PrimarySmtpAddress }
+    } | Out-Null
+    Add-HTButton -Parent $row -Module $m -Text 'Ustaw kopie wysłanych…' -Icon 'E724' -Danger -ToolTip 'Włączenie albo wyłączenie kopii wiadomości wysłanych przez delegatów w Elementach wysłanych zaznaczonych skrzynek' -OnClick {
+        param($m)
+        $targets = @(Get-HTChangeTargets -Module $m)
+        if ($targets.Count -eq 0) { return }
+        $form = Show-HTFormDialog -Title 'Kopie wysłanych przez delegatów' -Icon 'E724' -OkText 'Dalej' -Width 640 -Description "Skrzynki: $($targets.Count). Gdy delegat wysyła z tej skrzynki, kopia wiadomości trafia też do jej Elementów wysłanych (widzą ją wszyscy z dostępem), a nie tylko do skrzynki delegata." -Fields @(
+            @{ Name = 'SentAs'; Label = 'Kopia wiadomości wysłanych «jako» (SendAs)'; Type = 'Check'; Default = $true }
+            @{ Name = 'OnBehalf'; Label = 'Kopia wiadomości wysłanych «w imieniu» (SendOnBehalf)'; Type = 'Check'; Default = $true }
+        )
+        if (-not $form) { return }
+        $sentAs = [bool]$form.SentAs
+        $onBehalf = [bool]$form.OnBehalf
+        Invoke-HTTargetAction -Module $m -Name 'Kopie wysłanych przez delegatów' -Targets $targets -Label { param($t) Get-HTMailboxLabel $t } -Action {
+            param($t)
+            Set-HTMailboxSentItemsCopy -Identity $t.PrimarySmtpAddress -SentAs $sentAs -SendOnBehalf $onBehalf
+            "«jako»: $(if ($sentAs) { 'tak' } else { 'nie' }), «w imieniu»: $(if ($onBehalf) { 'tak' } else { 'nie' })"
         }
     } | Out-Null
     Add-HTRowAction -Module $m -Text 'Odbierz uprawnienie' -Icon 'E74D' -Danger -Action {

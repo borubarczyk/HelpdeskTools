@@ -373,7 +373,7 @@ Register-HTModule -Workspace 'ADUsers' -Category 'Cykl życia' -Key 'adu.sync' -
     $row = Add-HTToolbarRow -Module $m -Title 'Serwer'
     $m.C.Server = Add-HTTextBox -Parent $row -Width 240 -Text "$($Global:AadSyncServer)" -Placeholder 'np. srv-sync01'
     $m.C.Type = Add-HTSegmented -Parent $row -Items @('Delta', 'Pełna (Initial)')
-    Add-HTButton -Parent $row -Module $m -Text 'Synchronizuj' -Icon 'E895' -Primary -OnClick {
+    Add-HTButton -Parent $row -Module $m -Text 'Synchronizuj' -Icon 'E895' -Primary -Danger -NoRowMenu -OnClick {
         param($m)
         $server = $m.C.Server.Text.Trim()
         if (-not $server) { Show-HTWarning 'Podaj nazwę serwera Entra Connect (można ją zapisać w Ustawieniach).'; return }
@@ -467,10 +467,10 @@ Register-HTModule -Workspace 'ADComputers' -Category 'Komputer' -Key 'adc.ping' 
     $row = Add-HTToolbarRow -Module $m
     Add-HTButton -Parent $row -Module $m -Text 'Sprawdź' -Icon 'E703' -Primary -OnClick {
         param($m)
-        Invoke-HTTargetAction -Module $m -Name 'Dostępność' -NoConfirm -Service '' -Label { param($t) $t.Name } -Action {
+        Invoke-HTTargetQuery -Module $m -Name 'Dostępność' -Label { param($t) $t.Name } -Action {
             param($t)
             $r = Test-HTComputerReachable -ComputerName $(if ($t.DNSHostName) { $t.DNSHostName } else { $t.Name })
-            @{ Status = $(if ($r['Odpowiada na ping']) { 'OK' } else { 'Brak odpowiedzi' }); 'Adresy IP' = $r['Adresy IP (DNS)']; Ping = $r['Odpowiada na ping']; 'Opóźnienie (ms)' = $r['Opóźnienie (ms)'] }
+            [PSCustomObject][ordered]@{ Komputer = $t.Name; Status = $(if ($r['Odpowiada na ping']) { 'OK' } else { 'Brak odpowiedzi' }); 'Adresy IP' = $r['Adresy IP (DNS)']; Ping = $r['Odpowiada na ping']; 'Opóźnienie (ms)' = $r['Opóźnienie (ms)'] }
         }
     } | Out-Null
 }

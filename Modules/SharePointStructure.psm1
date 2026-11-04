@@ -570,13 +570,13 @@ function New-HTSPLibrary {
     if ($set.Count) { Set-PnPList -Identity $Title @set -ErrorAction Stop | Out-Null }
     $root = Get-PnPProperty -ClientObject $list -Property RootFolder
     # IsLibrary - obiekt uprawnień na poziomie listy (także dla zwykłej listy)
-    return [PSCustomObject]@{ Title = [string]$list.Title; ServerRelativeUrl = [string]$root.ServerRelativeUrl; ListTitle = [string]$list.Title; IsLibrary = $true; ItemCount = 0 }
+    return [PSCustomObject]@{ Title = [string]$list.Title; ServerRelativeUrl = [string]$root.ServerRelativeUrl; ListTitle = [string]$list.Title; ListId = [string]$list.Id; IsLibrary = $true; ItemCount = 0 }
 }
 
 function Get-HTSPLibrarySettings {
     # Ustawienia biblioteki: wiersz do tabeli i wartości (__values) do formularza
     param ([Parameter(Mandatory)][object]$Node)
-    $list = Get-PnPList -Identity $Node.ListTitle -ErrorAction Stop
+    $list = Get-PnPList -Identity (Get-HTSPListRef -Node $Node) -ErrorAction Stop
     Get-PnPProperty -ClientObject $list -Property Title, Description, EnableVersioning, MajorVersionLimit, EnableMinorVersions, ForceCheckout, EnableModeration, OnQuickLaunch, NoCrawl, Hidden, ItemCount, Created, LastItemUserModifiedDate, HasUniqueRoleAssignments | Out-Null
     $values = [ordered]@{
         Title = [string]$list.Title; Description = [string]$list.Description; EnableVersioning = [bool]$list.EnableVersioning; MajorVersions = [int]$list.MajorVersionLimit
@@ -609,10 +609,11 @@ function Set-HTSPLibrarySettings {
     $set = @{}
     foreach ($k in $Settings.Keys) { if ($k -notin 'OnQuickLaunch', 'NoCrawl') { $set[$k] = $Settings[$k] } }
     if ($Settings.Contains('NoCrawl')) { $set.NoCrawl = [bool]$Settings['NoCrawl'] }
-    if ($set.Count) { Set-PnPList -Identity $Node.ListTitle @set -ErrorAction Stop | Out-Null }
+    if ($set.Count) { Set-PnPList -Identity (Get-HTSPListRef -Node $Node) @set -ErrorAction Stop | Out-Null }
     if ($Settings.Contains('OnQuickLaunch')) {
-        $title = if ($Settings.Contains('Title')) { [string]$Settings['Title'] } else { $Node.ListTitle }
-        $list = Get-PnPList -Identity $title -ErrorAction Stop
+        # Po zmianie nazwy - nowy tytuł (identyfikator listy się nie zmienia)
+        $ref = if (Get-HTSPListId -Node $Node) { Get-HTSPListRef -Node $Node } elseif ($Settings.Contains('Title')) { [string]$Settings['Title'] } else { $Node.ListTitle }
+        $list = Get-PnPList -Identity $ref -ErrorAction Stop
         $list.OnQuickLaunch = [bool]$Settings['OnQuickLaunch']
         $list.Update()
         Invoke-PnPQuery -ErrorAction Stop
@@ -623,23 +624,23 @@ function Set-HTSPLibrarySettings {
 function Remove-HTSPLibrary {
     # Usunięcie biblioteki do kosza witryny (przywrócenie: SharePoint > Kosz witryny)
     param ([Parameter(Mandatory)][object]$Node)
-    Remove-PnPList -Identity $Node.ListTitle -Recycle -Force -ErrorAction Stop | Out-Null
+    Remove-PnPList -Identity (Get-HTSPListRef -Node $Node) -Recycle -Force -ErrorAction Stop | Out-Null
 }
 
 function Get-HTSPLibraryColumns {
     # Kolumny dodane do biblioteki (bez systemowych i ukrytych)
     param ([Parameter(Mandatory)][object]$Node)
-    foreach ($f in @(Get-PnPField -List $Node.ListTitle -ErrorAction Stop)) {
+    foreach ($f in @(Get-PnPField -List (Get-HTSPListRef -Node $Node) -ErrorAction Stop)) {
         if ($f.Hidden -or $f.ReadOnlyField -or $f.FromBaseType -or -not $f.CanBeDeleted) { continue }
         $choices = if ($f.PSObject.Properties['Choices']) { @($f.Choices) -join ', ' } else { '' }
-        [PSCustomObject]@{ Kolumna = $f.Title; 'Nazwa wewnętrzna' = $f.InternalName; Typ = $f.TypeDisplayName; Wymagana = [bool]$f.Required; Opcje = $choices; Grupa = $f.Group; __id = [string]$f.Id; __list = $Node.ListTitle }
+        [PSCustomObject]@{ Kolumna = $f.Title; 'Nazwa wewnętrzna' = $f.InternalName; Typ = $f.TypeDisplayName; Wymagana = [bool]$f.Required; Opcje = $choices; Grupa = $f.Group; __id = [string]$f.Id; __list = (Get-HTSPListRef -Node $Node) }
     }
 }
 
 function Add-HTSPLibraryColumn {
     # Nowa kolumna biblioteki z ConvertFrom-HTSPColumnSpec (dodawana do widoku domyślnego)
     param ([Parameter(Mandatory)][object]$Node, [Parameter(Mandatory)][hashtable]$Column)
-    $params = @{ List = $Node.ListTitle; DisplayName = $Column.DisplayName; InternalName = $Column.InternalName; Type = $Column.Type; AddToDefaultView = $true; ErrorAction = 'Stop' }
+    $params = @{ List = (Get-HTSPListRef -Node $Node); DisplayName = $Column.DisplayName; InternalName = $Column.InternalName; Type = $Column.Type; AddToDefaultView = $true; ErrorAction = 'Stop' }
     if ($Column.Required) { $params.Required = $true }
     if ($Column.Type -in 'Choice', 'MultiChoice') { $params.Choices = @($Column.Choices) }
     Add-PnPField @params | Out-Null
@@ -677,9 +678,9 @@ function Get-HTSPFolderTreeText {
         }
         if ($level -ge 0) { $lines.Add((ConvertTo-HTSPStructureLine -Name $n.Title -Level $level -Grants $grants -Unique:$unique)) }
         if ($level -ge $Depth) { return }
-        foreach ($child in @(Get-HTSPSubFolders -ServerRelativeUrl $n.ServerRelativeUrl -ListTitle $n.ListTitle)) { & $walk $child ($level + 1) }
+        foreach ($child in @(Get-HTSPSubFolders -ServerRelativeUrl $n.ServerRelativeUrl -ListTitle $n.ListTitle -ListId (Get-HTSPListId -Node $n))) { & $walk $child ($level + 1) }
     }
-    if ($Node) { foreach ($child in @(Get-HTSPSubFolders -ServerRelativeUrl $Node.ServerRelativeUrl -ListTitle $Node.ListTitle)) { & $walk $child 0 } }
+    if ($Node) { foreach ($child in @(Get-HTSPSubFolders -ServerRelativeUrl $Node.ServerRelativeUrl -ListTitle $Node.ListTitle -ListId (Get-HTSPListId -Node $Node))) { & $walk $child 0 } }
     else { foreach ($lib in @(Get-HTSPLibraries)) { & $walk $lib 0 } }
     return ($lines -join "`r`n")
 }
@@ -768,7 +769,7 @@ function Get-HTSPListFileItems {
     $all = @('FileLeafRef', 'FileRef', 'FSObjType') + @($Fields) | Select-Object -Unique
     $prefix = if ($Node.IsLibrary) { '' } else { ([string]$Node.ServerRelativeUrl).TrimEnd('/') + '/' }
     $count = 0
-    foreach ($item in @(Get-PnPListItem -List $Node.ListTitle -PageSize 2000 -Fields $all -ErrorAction Stop)) {
+    foreach ($item in @(Get-PnPListItem -List (Get-HTSPListRef -Node $Node) -PageSize 2000 -Fields $all -ErrorAction Stop)) {
         $v = $item.FieldValues
         if ([string]$v.FSObjType -ne '0') { continue }
         if ($prefix -and -not ([string]$v.FileRef).StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
@@ -785,10 +786,10 @@ function Get-HTSPCheckedOutFiles {
         $co = $v.CheckoutUser
         if (-not $co) { continue }
         $who = if ($co.LookupValue) { "$($co.LookupValue)$(if ($co.Email) { " <$($co.Email)>" })" } else { [string]$co }
-        [PSCustomObject]@{ Plik = $v.FileLeafRef; Folder = ([string]$v.FileRef).Substring(0, ([string]$v.FileRef).LastIndexOf('/')); Wyewidencjonował = $who; Zmieniono = $v.Modified; Rozmiar = (Format-HTBytes $v.File_x0020_Size); Stan = 'Wyewidencjonowany'; __url = [string]$v.FileRef; __list = $Node.ListTitle; __kind = 'CheckedOut' }
+        [PSCustomObject]@{ Plik = $v.FileLeafRef; Folder = ([string]$v.FileRef).Substring(0, ([string]$v.FileRef).LastIndexOf('/')); Wyewidencjonował = $who; Zmieniono = $v.Modified; Rozmiar = (Format-HTBytes $v.File_x0020_Size); Stan = 'Wyewidencjonowany'; __url = [string]$v.FileRef; __list = (Get-HTSPListRef -Node $Node); __kind = 'CheckedOut' }
     }
     try {
-        $list = Get-PnPList -Identity $Node.ListTitle -ErrorAction Stop
+        $list = Get-PnPList -Identity (Get-HTSPListRef -Node $Node) -ErrorAction Stop
         $files = $list.GetCheckedOutFiles()
         $ctx = Get-PnPContext
         $ctx.Load($files)
@@ -799,7 +800,7 @@ function Get-HTSPCheckedOutFiles {
             if ($prefix -and -not $path.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
             $by = ''
             try { $by = [string](Get-PnPProperty -ClientObject $f -Property CheckedOutBy).Title } catch { $by = [string]$f.CheckedOutById }
-            [PSCustomObject]@{ Plik = $path.Substring($path.LastIndexOf('/') + 1); Folder = $path.Substring(0, $path.LastIndexOf('/')); Wyewidencjonował = $by; Zmieniono = $null; Rozmiar = ''; Stan = 'Bez wersji zaewidencjonowanej (widzi go tylko ta osoba)'; __url = $path; __list = $Node.ListTitle; __kind = 'NoVersion'; __flag = 'warn' }
+            [PSCustomObject]@{ Plik = $path.Substring($path.LastIndexOf('/') + 1); Folder = $path.Substring(0, $path.LastIndexOf('/')); Wyewidencjonował = $by; Zmieniono = $null; Rozmiar = ''; Stan = 'Bez wersji zaewidencjonowanej (widzi go tylko ta osoba)'; __url = $path; __list = (Get-HTSPListRef -Node $Node); __kind = 'NoVersion'; __flag = 'warn' }
         }
     }
     catch { Write-Log -Message "Pliki bez wersji zaewidencjonowanej ($($Node.ListTitle)): $($_.Exception.Message)" -Type 'Warn' }

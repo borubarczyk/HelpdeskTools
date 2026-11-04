@@ -158,6 +158,40 @@ try {
 }
 catch { $failures.Add("Autotest: $($_.Exception.Message)") }
 
+# Kopiowanie tabeli (Ctrl+C) z nagłówkami: nazwa kolumny zamiast elementu nagłówka
+try {
+    $col = New-Object System.Windows.Controls.DataGridTextColumn
+    $col.SortMemberPath = 'Status'
+    $col.Header = New-HTColumnHeader -Module @{} -Name 'Status'
+    $copyArgs = New-Object System.Windows.Controls.DataGridRowClipboardEventArgs($null, 0, 0, $true)
+    $copyArgs.ClipboardRowContent.Add((New-Object System.Windows.Controls.DataGridClipboardCellContent($null, $col, $col.Header)))
+    & (Get-Module UIComponents) { param($a) & $script:GridCopyEvents.CopyRow $null $a } $copyArgs
+    if ([string]$copyArgs.ClipboardRowContent[0].Content -ne 'Status') { $failures.Add("Kopiowanie nagłówków: «$($copyArgs.ClipboardRowContent[0].Content)» zamiast «Status».") }
+}
+catch { $failures.Add("Kopiowanie nagłówków: $($_.Exception.Message)") }
+
+# Pokrycie testami: każdy moduł opisany, moduły wskazane w testach zapisu istnieją
+try {
+    $coverage = @(Get-HTSelfTestCoverage -Modules @(Get-HTModuleCoverageInfo))
+    if ($coverage.Count -ne @(Get-HTModuleDefinitions).Count) { $failures.Add("Pokrycie testami: $($coverage.Count) wierszy, modułów: $(@(Get-HTModuleDefinitions).Count).") }
+    $keys = @(Get-HTModuleDefinitions | ForEach-Object { $_.Key })
+    $unknown = @(Get-HTSelfTests -IncludeWrite -IncludeSlow | ForEach-Object { $t = $_; @($t.Modules) | Where-Object { $keys -notcontains $_ } | ForEach-Object { "$($t.Key): $_" } })
+    if ($unknown.Count) { $failures.Add("Testy zapisu wskazują nieistniejące moduły: $($unknown -join ', ').") }
+    Write-Host "Pokrycie testami: pełne $(@($coverage | Where-Object Pokrycie -eq 'pełne').Count), tylko odczyt $(@($coverage | Where-Object Pokrycie -eq 'tylko odczyt').Count), brak $(@($coverage | Where-Object Pokrycie -eq 'brak').Count)."
+}
+catch { $failures.Add("Pokrycie testami: $($_.Exception.Message)") }
+
+# Przegląd wszystkich sekcji bez połączeń: moduły usług - pominięte, moduły bez usług - przycisk odczytu naprawdę
+try {
+    $sweep = @(Invoke-HTModuleSweep -ExcludeKeys @('sites.connect', 'org.selftest'))
+    if ($sweep.Count -lt 100) { $failures.Add("Przegląd sekcji: tylko $($sweep.Count) modułów.") }
+    foreach ($r in @($sweep | Where-Object { $_.Status -eq 'Błąd' })) { $failures.Add("Przegląd sekcji - $($r.Klucz): $($r.Szczegóły)") }
+    if (Test-HTDialogCapture) { $failures.Add('Przegląd sekcji: tryb przechwytywania okien nie został wyłączony.') }
+    Write-Host "Przegląd sekcji: $(Get-HTSelfTestSummary -Rows $sweep)"
+    foreach ($r in @($sweep | Where-Object { $_.Status -in 'OK', 'Uwaga' })) { Write-Host "  $($r.Status): $($r.Klucz) - $($r.Szczegóły)" }
+}
+catch { $failures.Add("Przegląd sekcji: $($_.Exception.Message)") }
+
 $palette = @(Get-HTPaletteItems -Query 'licencje')
 if ($palette.Count -eq 0) { $failures.Add('Paleta poleceń: brak wyników dla «licencje».') }
 if (@(Get-HTPaletteItems -Query '').Count -eq 0) { $failures.Add('Paleta poleceń: brak poleceń bez zapytania.') }

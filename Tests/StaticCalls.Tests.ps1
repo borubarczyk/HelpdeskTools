@@ -114,6 +114,29 @@ Describe "Statyczna kontrola wywołań" {
         @($problems) | Should -BeNullOrEmpty
     }
 
+    It "główny przycisk odczytu (niebieski, F5, przegląd sekcji w autoteście) nie wykonuje zmian" {
+        # Przycisk -Primary bez -Danger / -Create jest akcją odczytu: F5 i autotest klikają go bez pytania.
+        $changeCalls = @('Confirm-HTChange', 'Invoke-HTTargetAction', 'Invoke-HTRowAction', 'Assert-HTWriteAllowed')
+        # Wyjątek: autotest - testy zapisu są opcjonalne (domyślnie wyłączone) i zawsze z potwierdzeniem; przegląd sekcji go pomija
+        $allowed = @("'Uruchom autotest'")
+        $problems = foreach ($rel in @($script:Asts.Keys | Where-Object { $_ -like 'GUI*' })) {
+            foreach ($c in $script:Asts[$rel].FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Add-HTButton' }, $true)) {
+                $params = @($c.CommandElements | Where-Object { $_ -is [System.Management.Automation.Language.CommandParameterAst] } | ForEach-Object { $_.ParameterName })
+                if ($params -notcontains 'Primary' -or $params -contains 'Danger' -or $params -contains 'Create') { continue }
+                $els = @($c.CommandElements)
+                $textIndex = [array]::IndexOf(@($els | ForEach-Object { if ($_ -is [System.Management.Automation.Language.CommandParameterAst]) { $_.ParameterName } else { '' } }), 'Text')
+                $text = if ($textIndex -ge 0 -and $textIndex + 1 -lt $els.Count) { $els[$textIndex + 1].Extent.Text } else { '' }
+                if ($allowed -contains $text) { continue }
+                $i = [array]::IndexOf(@($els | ForEach-Object { if ($_ -is [System.Management.Automation.Language.CommandParameterAst]) { $_.ParameterName } else { '' } }), 'OnClick')
+                if ($i -lt 0 -or $i + 1 -ge $els.Count) { continue }
+                $body = $els[$i + 1]
+                $used = @($body.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true) | ForEach-Object { $_.GetCommandName() } | Where-Object { $changeCalls -contains $_ } | Select-Object -Unique)
+                if ($used.Count) { "$($rel):$($c.Extent.StartLineNumber) $text - $($used -join ', ')" }
+            }
+        }
+        @($problems) | Should -BeNullOrEmpty
+    }
+
     It "parametry w wywołaniach funkcji programu istnieją (pełna nazwa albo jednoznaczny początek)" {
         $problems = foreach ($rel in $script:Asts.Keys) {
             foreach ($c in $script:Asts[$rel].FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {

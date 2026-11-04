@@ -136,7 +136,7 @@ Register-HTModule -Workspace 'Tasks' -Category 'Zadania zaplanowane' -Key 'tasks
     -Description 'Dostęp na określony czas: członkostwo w grupie (np. dostęp do aplikacji lub zespołu na czas projektu) albo pełny dostęp / wyślij jako do skrzynki (zastępstwo urlopowe). Uprawnienie jest nadawane od razu, a jego odebranie trafia do zadań zaplanowanych.' -Build {
     param($m)
     $row = Add-HTToolbarRow -Module $m
-    Add-HTButton -Parent $row -Module $m -Text 'Członkostwo w grupie…' -Icon 'E902' -Primary -OnClick {
+    Add-HTButton -Parent $row -Module $m -Text 'Członkostwo w grupie…' -Icon 'E902' -Primary -Create -NoRowMenu -OnClick {
         param($m)
         if (-not (Assert-HTConnection -Service 'Graph')) { return }
         if (-not (Assert-HTWriteAllowed -Operation 'Uprawnienia tymczasowe')) { return }

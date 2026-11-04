@@ -239,3 +239,37 @@ Describe "Biblioteki załadowane w procesie" {
         $r.LoadedIssues.Count | Should -Be 0
     }
 }
+
+Describe "Microsoft Graph: logowanie i rozłączanie" {
+    AfterEach {
+        Remove-Item -Path Function:\global:Disconnect-MgGraph, Function:\global:Connect-MgGraph -ErrorAction SilentlyContinue
+    }
+    It "logowanie trzyma tokeny tylko w pamięci procesu (bez czyszczenia pamięci MSAL przy rozłączaniu)" {
+        $p = Get-HTGraphConnectParams -Scopes 'User.Read.All', 'Group.Read.All' -TenantId 'contoso.onmicrosoft.com'
+        $p.ContextScope | Should -Be 'Process'
+        $p.TenantId | Should -Be 'contoso.onmicrosoft.com'
+        @($p.Scopes).Count | Should -Be 2
+        $p.NoWelcome | Should -BeTrue
+        $p.ErrorAction | Should -Be 'Stop'
+        (Get-HTGraphConnectParams -Scopes 'User.Read.All').ContainsKey('TenantId') | Should -BeFalse
+    }
+    It "pomija -ContextScope, gdy polecenie go nie ma" {
+        function global:Connect-MgGraph { [CmdletBinding()] param([string[]]$Scopes, [string]$TenantId, [switch]$NoWelcome) }
+        (Get-HTGraphConnectParams -Scopes 'User.Read.All').ContainsKey('ContextScope') | Should -BeFalse
+    }
+    It "ostrzeżenie przy rozłączaniu trafia do dziennika, nie do konsoli" {
+        function global:Disconnect-MgGraph {
+            [CmdletBinding()] param()
+            Write-Warning 'Failed to clear the persisted MSAL token cache during Disconnect-MgGraph: The authority (including the tenant ID) must be in a well-formed URI format.'
+            [PSCustomObject]@{ Account = 'admin@contoso.onmicrosoft.com' }
+        }
+        Mock -ModuleName ModulesConnection Write-Log { }
+        $out = Disconnect-HTGraph 3>&1
+        @($out).Count | Should -Be 0
+        Should -Invoke -ModuleName ModulesConnection Write-Log -Times 1 -ParameterFilter { $Message -like '*MSAL token cache*' -and $Type -eq 'Info' }
+    }
+    It "błąd rozłączania jest przekazywany dalej (obsługuje go Set-Connections)" {
+        function global:Disconnect-MgGraph { [CmdletBinding()] param() throw 'No application to sign out from.' }
+        { Disconnect-HTGraph } | Should -Throw '*No application*'
+    }
+}
