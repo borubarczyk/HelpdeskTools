@@ -4059,6 +4059,8 @@ function Add-HTButton {
     [void]$Module.Buttons.Add($b)
     # F5 (główna akcja modułu) nigdy nie wykonuje zmiany - tylko odczyt (zasada trzech etapów)
     if ($Primary -and -not $change -and -not $Module.PrimaryButton) { $Module.PrimaryButton = $b }
+    # Liczba przycisków zmian (także bez pozycji w menu wierszy) - «Pokrycie testami» w autoteście
+    if ($change) { $Module['ChangeButtonCount'] = [int]$Module['ChangeButtonCount'] + 1 }
     # Przyciski zmian (czerwone i zielone) są też w menu prawego przycisku na wierszach wyników (zaznaczone obiekty)
     if ($change -and -not $NoRowMenu) {
         if (-not $Module['ChangeButtons']) { $Module['ChangeButtons'] = New-Object System.Collections.Generic.List[hashtable] }

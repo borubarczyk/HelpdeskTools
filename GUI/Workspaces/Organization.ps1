@@ -241,7 +241,8 @@ function Get-HTModuleCoverageInfo {
     # Opisy modułów do pokrycia testami: czy jest przycisk odczytu i ile przycisków zmian (moduły budowane bez pokazywania)
     foreach ($d in @(Get-HTModuleDefinitions)) {
         $m = Get-HTModuleInstance -Key $d.Key
-        $changes = if ($m) { @($m.ChangeButtons).Count + @($m.RowActions | Where-Object { $_.Danger }).Count } else { 0 }
+        # @($null).Count to 1 - liczniki tylko z istniejących wpisów
+        $changes = if ($m) { [int]$m['ChangeButtonCount'] + @($m.RowActions | Where-Object { $_ -and $_.Danger }).Count } else { 0 }
         [PSCustomObject]@{ Key = $d.Key; Workspace = (Get-HTWorkspaceTitle $d.Workspace); Category = $d.Category; Title = $d.Title; HasRead = [bool]($m -and $m.PrimaryButton); ChangeCount = $changes }
     }
 }

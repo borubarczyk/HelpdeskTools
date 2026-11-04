@@ -341,6 +341,18 @@ function Get-HTSelfTestLeftovers {
         }
         catch { Write-Verbose "Lista dozwolonych i zablokowanych: $($_.Exception.Message)" }
     }
+    if ($Connected.AD) {
+        foreach ($u in @(Get-ADUser -Filter "Name -like '$prefix*'" -ErrorAction Stop)) {
+            [PSCustomObject]@{ Obiekt = $u.Name; Rodzaj = 'Konto AD'; Usługa = 'AD'; Adres = [string]$u.UserPrincipalName; Id = [string]$u.ObjectGUID; __kind = 'ADUser' }
+        }
+        foreach ($g in @(Get-ADGroup -Filter "Name -like '$prefix*'" -ErrorAction Stop)) {
+            [PSCustomObject]@{ Obiekt = $g.Name; Rodzaj = 'Grupa AD'; Usługa = 'AD'; Adres = ''; Id = [string]$g.ObjectGUID; __kind = 'ADGroup' }
+        }
+        # Konto komputera ma krótką nazwę (limit 15 znaków) - rozpoznawane po opisie z prefiksem
+        foreach ($c in @(Get-ADComputer -Filter "Description -like '$prefix*'" -Properties Description -ErrorAction Stop)) {
+            [PSCustomObject]@{ Obiekt = [string]$c.Description; Rodzaj = "Komputer AD ($($c.Name))"; Usługa = 'AD'; Adres = ''; Id = [string]$c.ObjectGUID; __kind = 'ADComputer' }
+        }
+    }
     if ($Connected.SharePoint) {
         foreach ($g in @(Get-HTSPGroups | Where-Object { ([string]$_.Title).StartsWith($prefix) })) {
             [PSCustomObject]@{ Obiekt = $g.Title; Rodzaj = 'Grupa SharePoint (połączona witryna)'; Usługa = 'SharePoint'; Adres = ''; Id = [string]$g.Title; __kind = 'SPGroup' }
@@ -362,6 +374,9 @@ function Remove-HTSelfTestLeftover {
         'MailContact' { Remove-HTMailContact -Identity $Item.Id }
         'TransportRule' { Remove-TransportRule -Identity $Item.Id -Confirm:$false -ErrorAction Stop }
         'AllowBlockSender' { Remove-HTTenantAllowBlockItem -ListType Sender -Ids @($Item.Id) }
+        'ADUser' { Remove-HTADObject -Section 'User' -Identity $Item.Id }
+        'ADGroup' { Remove-HTADObject -Section 'Group' -Identity $Item.Id }
+        'ADComputer' { Remove-HTADObject -Section 'Computer' -Identity $Item.Id }
         'SPGroup' { Remove-HTSPGroup -Group $Item.Id }
         default { throw "Nieznany rodzaj obiektu: $($Item.__kind)" }
     }
@@ -1547,4 +1562,112 @@ Register-HTSelfTest -Key 'ad.domain' -Name 'Domena Active Directory' -Service 'A
     $users = @(Get-ADUser -Filter * -ResultSetSize 5 -ErrorAction Stop)
     return "Domena $($d.DNSRoot) (poziom $($d.DomainMode)), odczyt kont: $($users.Count)"
 }
+
+# Obiekty testowe AD powstają w kontenerach domyślnych (Users, Computers) - zablokowane, usuwane po teście. Gdy kontenery
+# są w zakresie synchronizacji Entra Connect, konta testowe mogą na chwilę pojawić się w Entra ID (też zablokowane).
+Register-HTSelfTest -Key 'ad.w.objects' -Name 'Konta, grupa i komputer AD: utwórz, atrybuty, hasło, stan, grupy, przeniesienie, usuń' -Service 'AD' -Mode 'Write' -Area 'Active Directory' `
+    -Modules @('adu.new', 'adu.state', 'adu.edit', 'adu.password', 'adu.lockout', 'adu.groups', 'adu.offboard', 'adu.rep.inactive', 'adg.members', 'adg.manage', 'adc.manage') -Test {
+    param($ctx)
+    $domain = Get-ADDomain -ErrorAction Stop
+    $suffix = @(Get-HTADUpnSuffixes)[0]
+    $digits = $ctx.Stamp -replace '\D', ''
+    $name = Get-HTSelfTestName -Context $ctx -Suffix 'AD'
+    $newUser = {
+        param($Letter)
+        $sam = "htat$Letter$($digits.Substring(2))"
+        $u = New-HTADUser -GivenName $name -Surname "Konto$Letter" -SamAccountName $sam -UserPrincipalName "$sam@$suffix" -Password (New-Password -Length 20 -StartWithLetter $true) -Title 'Autotest' -Department 'HT-Autotest' -Enabled $false -ChangeAtLogon $true
+        $guid = [string]$u.ObjectGUID
+        Add-HTSelfTestCleanup -Context $ctx -Name "Usunięcie konta AD $sam" -Action { Remove-HTADObject -Section 'User' -Identity $guid }.GetNewClosure()
+        [PSCustomObject]@{ Sam = $sam; Guid = $guid }
+    }
+    $a = & $newUser 'a'
+    $b = & $newUser 'b'
+    $group = New-HTADGroup -Name "$name-Grupa" -Category Security -Scope Global -Description 'Autotest Helpdesk Tools - do usunięcia'
+    $groupGuid = [string]$group.ObjectGUID
+    Add-HTSelfTestCleanup -Context $ctx -Name "Usunięcie grupy AD $name-Grupa" -Action { Remove-HTADObject -Section 'Group' -Identity $groupGuid }.GetNewClosure()
+    $user = { param($Guid) Get-ADUser -Identity $Guid -Properties Title, Department, Description, ScriptPath, PasswordNeverExpires, AccountExpirationDate, MemberOf -ErrorAction Stop }
+    $inGroup = { param($Guid) @(Get-HTADGroupMembers -Identity $groupGuid | Where-Object { $_.DistinguishedName -eq (& $user $Guid).DistinguishedName }).Count }
+
+    Invoke-HTSelfTestStep -Context $ctx -Step 'szczegóły konta' -Run { Assert-HTSelfTest (Get-HTADObjectDetail -Section 'User' -Identity $a.Guid) 'Brak szczegółów konta' }
+    Invoke-HTSelfTestStep -Context $ctx -Step 'atrybuty i profil' -Run {
+        Set-HTADUserAttributes -Identity $a.Guid -Attributes @{ Title = 'Autotest 2'; Description = 'Autotest Helpdesk Tools' }
+        Set-HTADUserProfile -Identity $a.Guid -ScriptPath 'autotest.bat'
+        $u = & $user $a.Guid
+        Assert-HTSelfTest ($u.Title -eq 'Autotest 2' -and $u.ScriptPath -eq 'autotest.bat') "Atrybuty: stanowisko «$($u.Title)», skrypt «$($u.ScriptPath)»"
+        Set-HTADUserProfile -Identity $a.Guid -ScriptPath ''
+        Assert-HTSelfTest (-not (& $user $a.Guid).ScriptPath) 'Skrypt logowania nie został wyczyszczony'
+    }
+    Invoke-HTSelfTestStep -Context $ctx -Step 'hasło: reset, zmiana przy logowaniu, «nigdy nie wygasa»' -Run {
+        Reset-HTADUserPassword -Identity $a.Guid -Password (New-Password -Length 20 -StartWithLetter $true) -ChangeAtLogon $true
+        Set-HTADChangePasswordAtLogon -Identity $a.Guid -Value $false
+        Set-HTADPasswordNeverExpires -Identity $a.Guid -Value $true
+        Assert-HTSelfTest (& $user $a.Guid).PasswordNeverExpires 'Hasło nie jest ustawione jako niewygasające'
+        Set-HTADPasswordNeverExpires -Identity $a.Guid -Value $false
+        Set-HTADChangePasswordAtLogon -Identity $a.Guid -Value $true
+    }
+    Invoke-HTSelfTestStep -Context $ctx -Step 'stan konta: włącz, wyłącz, odblokuj, data wygaśnięcia, blokady na kontrolerach' -Run {
+        Set-HTADAccountState -Identity $a.Guid -State Enable
+        Assert-HTSelfTest (Get-ADUser -Identity $a.Guid -ErrorAction Stop).Enabled 'Konto nie zostało włączone'
+        Set-HTADAccountState -Identity $a.Guid -State Disable
+        Assert-HTSelfTest (-not (Get-ADUser -Identity $a.Guid -ErrorAction Stop).Enabled) 'Konto nie zostało wyłączone'
+        Set-HTADAccountState -Identity $a.Guid -State Unlock
+        Set-HTADAccountExpiration -Identity $a.Guid -Date (Get-Date).Date.AddDays(30)
+        Assert-HTSelfTest (& $user $a.Guid).AccountExpirationDate 'Brak daty wygaśnięcia'
+        Set-HTADAccountExpiration -Identity $a.Guid -Date $null
+        Assert-HTSelfTest (-not (& $user $a.Guid).AccountExpirationDate) 'Data wygaśnięcia nie została usunięta'
+        Assert-HTSelfTest (@(Get-HTADLockoutStatus -Identity $a.Guid).Count) 'Brak stanu blokady z kontrolerów domeny'
+    }
+    Invoke-HTSelfTestStep -Context $ctx -Step 'grupy: dodanie, kopiowanie od wzorca, usunięcie' -Run {
+        Add-HTADGroupMember -Group $groupGuid -Members @($a.Guid)
+        Assert-HTSelfTest (& $inGroup $a.Guid) 'Konto nie jest członkiem grupy'
+        Assert-HTSelfTest (@(Get-HTADObjectGroups -DistinguishedName (& $user $a.Guid).DistinguishedName | Where-Object { $_.Name -eq "$name-Grupa" }).Count) 'Grupa niewidoczna w grupach konta'
+        $copy = @(Copy-HTADGroupMembership -SourceIdentity $a.Guid -TargetIdentity $b.Guid)
+        Assert-HTSelfTest (-not @($copy | Where-Object { $_.Status -eq 'Błąd' }).Count) "Kopiowanie grup: $(@($copy | Where-Object { $_.Status -eq 'Błąd' } | ForEach-Object { "$($_.Grupa): $($_.Szczegóły)" }) -join '; ')"
+        Assert-HTSelfTest (& $inGroup $b.Guid) 'Drugie konto nie dostało grupy wzorca'
+        Remove-HTADGroupMember -Group $groupGuid -Members @($a.Guid)
+        Assert-HTSelfTest (-not (& $inGroup $a.Guid)) 'Konto nadal jest członkiem grupy'
+    }
+    Invoke-HTSelfTestStep -Context $ctx -Step 'grupa: opis, właściciel, typ, zakres, nazwa' -Run {
+        Set-HTADGroupProperties -Identity $groupGuid -Description 'Autotest Helpdesk Tools 2' -ManagedBy $a.Sam
+        Set-HTADGroupCategory -Identity $groupGuid -Category Distribution
+        Set-HTADGroupCategory -Identity $groupGuid -Category Security
+        Set-HTADGroupScope -Identity $groupGuid -Scope DomainLocal
+        Set-HTADGroupScope -Identity $groupGuid -Scope Global
+        Rename-HTADGroup -Identity $groupGuid -NewName "$name-Grupa2"
+        $g = Get-ADGroup -Identity $groupGuid -Properties Description, ManagedBy -ErrorAction Stop
+        Assert-HTSelfTest ($g.Name -eq "$name-Grupa2" -and "$($g.GroupScope)" -eq 'Global' -and "$($g.GroupCategory)" -eq 'Security' -and $g.ManagedBy) "Grupa po zmianach: $($g.Name), $($g.GroupCategory), $($g.GroupScope), właściciel $($g.ManagedBy)"
+    }
+    Invoke-HTSelfTestStep -Context $ctx -Step 'przeniesienie do kontenera Computers i z powrotem' -Run {
+        Move-HTADObject -Identity $a.Guid -TargetPath $domain.ComputersContainer
+        Assert-HTSelfTest ((& $user $a.Guid).DistinguishedName -like "*,$($domain.ComputersContainer)") 'Konto nie zostało przeniesione'
+        Move-HTADObject -Identity $a.Guid -TargetPath $domain.UsersContainer
+    }
+    Invoke-HTSelfTestStep -Context $ctx -Step 'offboarding AD: wyłączenie, hasło, usunięcie ze wszystkich grup, opis' -Run {
+        Set-HTADAccountState -Identity $b.Guid -State Disable
+        Reset-HTADUserPassword -Identity $b.Guid -Password (New-Password -Length 20 -StartWithLetter $true) -ChangeAtLogon $true
+        $removed = @(Remove-HTADAllGroupMembership -Identity $b.Guid)
+        Assert-HTSelfTest ($removed -contains "$name-Grupa2") "Usunięto z grup: $($removed -join ', ')"
+        Set-HTADUserAttributes -Identity $b.Guid -Attributes @{ Description = "Offboarding $(Get-Date -Format 'yyyy-MM-dd') (autotest)" }
+        Assert-HTSelfTest (-not @((& $user $b.Guid).MemberOf).Count) 'Konto nadal należy do grup'
+    }
+    # Konto komputera bez komputera (przygotowane w AD) - zmiany bez wpływu na urządzenie; restartu test nie wykonuje
+    Invoke-HTSelfTestStep -Context $ctx -Step 'komputer (konto przygotowane): opis, stan, przeniesienie, usunięcie' -Run {
+        $pc = "HTAT$($digits.Substring(8))"
+        New-ADComputer -Name $pc -SamAccountName "$pc`$" -Enabled $false -Description $name -ErrorAction Stop
+        $computer = Get-ADComputer -Identity "$pc`$" -ErrorAction Stop
+        $pcGuid = [string]$computer.ObjectGUID
+        $state = @{ Removed = $false }
+        Add-HTSelfTestCleanup -Context $ctx -Name "Usunięcie komputera $pc" -Action { if (-not $state.Removed) { Remove-HTADObject -Section 'Computer' -Identity $pcGuid } }.GetNewClosure()
+        Set-HTADComputerDescription -Identity $pcGuid -Description "$name - opis"
+        Set-HTADAccountState -Identity $pcGuid -State Enable
+        Set-HTADAccountState -Identity $pcGuid -State Disable
+        Move-HTADObject -Identity $pcGuid -TargetPath $domain.UsersContainer
+        $c = Get-ADComputer -Identity $pcGuid -Properties Description -ErrorAction Stop
+        Assert-HTSelfTest ($c.Description -eq "$name - opis" -and -not $c.Enabled -and $c.DistinguishedName -like "*,$($domain.UsersContainer)") "Komputer po zmianach: opis «$($c.Description)», włączony $($c.Enabled), $($c.DistinguishedName)"
+        Remove-HTADObject -Section 'Computer' -Identity $pcGuid
+        $state.Removed = $true
+    }
+    return Complete-HTSelfTestSteps -Context $ctx -Subject "$($a.Sam), $($b.Sam), grupa $name-Grupa (domena $($domain.DNSRoot))" -Footer 'obiekty usuwane po teście'
+}
+Register-HTSelfTestExemption -Modules @('adu.sync') -Reason 'Uruchamia synchronizację Entra Connect na serwerze (zmienia stan usługi, a nie obiekt testowy).'
 #endregion
