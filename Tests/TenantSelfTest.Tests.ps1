@@ -115,3 +115,36 @@ Describe "Autotest: wersje modułów" {
         $row.Status | Should -Not -Be 'Błąd'
     }
 }
+
+Describe "Autotest: zgodność z danymi zwracanymi przez program" {
+    It "test kont czyta pola szczegółów konta (UPN), a nie nieistniejące właściwości" {
+        $text = (@(Get-HTSelfTests -Key 'graph.users')[0]).Test.ToString()
+        $text | Should -Match "detail\['UPN'\]"
+        $text | Should -Not -Match 'detail\.User\.'
+    }
+}
+
+Describe "Autotest: pokrycie modułów testami" {
+    It "każdy test zapisu wskazuje sprawdzane moduły, a te moduły istnieją w programie" {
+        $root = Split-Path -Parent $PSScriptRoot
+        $keys = @(Get-ChildItem -Path (Join-Path $root 'GUI') -Recurse -Filter *.ps1 | ForEach-Object { [regex]::Matches((Get-Content -LiteralPath $_.FullName -Raw), "-Key '([a-z0-9\.]+)'") | ForEach-Object { $_.Groups[1].Value } } | Select-Object -Unique)
+        foreach ($t in @(Get-HTSelfTests -IncludeWrite -IncludeSlow | Where-Object { $_.Mode -eq 'Write' -and $_.Key -notlike 'zz.*' })) {
+            @($t.Modules).Count | Should -BeGreaterThan 0 -Because $t.Key
+            foreach ($k in @($t.Modules)) { $keys | Should -Contain $k -Because "$($t.Key) -> $k" }
+        }
+    }
+    It "pokrycie: pełne, tylko odczyt (zmiany bez testu zapisu), brak" {
+        Register-HTSelfTest -Key 'zz.cov' -Name 'Test pokrycia' -Service 'Lokalnie' -Mode 'Write' -Area 'Test' -Modules @('mod.a') -Test { 'ok' }
+        $rows = @(Get-HTSelfTestCoverage -Modules @(
+                [PSCustomObject]@{ Key = 'mod.a'; Workspace = 'W'; Category = 'K'; Title = 'A'; HasRead = $true; ChangeCount = 2 }
+                [PSCustomObject]@{ Key = 'mod.b'; Workspace = 'W'; Category = 'K'; Title = 'B'; HasRead = $true; ChangeCount = 1 }
+                [PSCustomObject]@{ Key = 'mod.c'; Workspace = 'W'; Category = 'K'; Title = 'C'; HasRead = $false; ChangeCount = 0 }
+                [PSCustomObject]@{ Key = 'mod.d'; Workspace = 'W'; Category = 'K'; Title = 'D'; HasRead = $true; ChangeCount = 0 }
+            ))
+        ($rows | Where-Object Klucz -eq 'mod.a').Pokrycie | Should -Be 'pełne'
+        ($rows | Where-Object Klucz -eq 'mod.a').'Testy zapisu' | Should -Match 'Test pokrycia'
+        ($rows | Where-Object Klucz -eq 'mod.b').Pokrycie | Should -Be 'tylko odczyt'
+        ($rows | Where-Object Klucz -eq 'mod.c').Pokrycie | Should -Be 'brak'
+        ($rows | Where-Object Klucz -eq 'mod.d').Pokrycie | Should -Be 'pełne'
+    }
+}

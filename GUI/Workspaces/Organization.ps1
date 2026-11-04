@@ -215,6 +215,37 @@ Register-HTModule -Workspace 'Organization' -Category 'Domeny' -Key 'org.domains
 #endregion
 
 #region Autotest funkcji (diagnostyka na tenancie)
+function Invoke-HTSelfTestSweep {
+    <#
+        Przegląd wszystkich sekcji: w każdym module wybranych przestrzeni przycisk odczytu na przykładowym obiekcie
+        (własne konto, własna skrzynka, zespół, biblioteka «Dokumenty» - albo pierwszy na liście). Okna są przechwytywane,
+        więc nic się nie zmienia. Wiersze trafiają do tabeli modułu autotestu i do -Results.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Module, [System.Collections.Generic.List[object]]$Results, [string[]]$Workspaces = @())
+    $me = ''
+    try { $me = [string](Get-MgContext).Account } catch { Write-Verbose $_ }
+    if (-not $me -and $Global:ConnectedToExchange) { try { $me = [string]@(Get-ConnectionInformation)[0].UserPrincipalName } catch { Write-Verbose $_ } }
+    $prefs = @{
+        m365users  = { param($o) $me -and [string]$o.UserPrincipalName -ieq $me }.GetNewClosure()
+        mailboxes  = { param($o) $me -and ([string]$o.UserPrincipalName -ieq $me -or [string]$o.PrimarySmtpAddress -ieq $me) }.GetNewClosure()
+        m365groups = { param($o) [bool]$o.IsTeam }
+        spTree     = { param($o) [string]$o.ServerRelativeUrl -match '/Shared( |%20)Documents$' }
+    }
+    # Pomijane: sam autotest i połączenie z inną witryną (przełącza połączenie SharePoint)
+    Invoke-HTModuleSweep -Workspaces $Workspaces -ExcludeKeys @('org.selftest', 'sites.connect') -Preferences $prefs -ShouldStop { Test-HTStopRequested } `
+        -OnStart { param($d, $i, $n) Set-HTProgress -Value $i -Maximum $n -Text "Przegląd sekcji [$i/$n] $($d.Title)"; Update-HTUi } `
+        -OnResult { param($r) if ($null -ne $Results) { $Results.Add($r) }; Add-HTResultRows -Module $Module -Objects @($r); Write-Log -Message "Przegląd sekcji: $($r.Test) - $($r.Status) $($r.Szczegóły)" -Type $(if ($r.Status -eq 'Błąd') { 'Warn' } else { 'Debug' }); Update-HTUi } | Out-Null
+}
+
+function Get-HTModuleCoverageInfo {
+    # Opisy modułów do pokrycia testami: czy jest przycisk odczytu i ile przycisków zmian (moduły budowane bez pokazywania)
+    foreach ($d in @(Get-HTModuleDefinitions)) {
+        $m = Get-HTModuleInstance -Key $d.Key
+        $changes = if ($m) { @($m.ChangeButtons).Count + @($m.RowActions | Where-Object { $_.Danger }).Count } else { 0 }
+        [PSCustomObject]@{ Key = $d.Key; Workspace = (Get-HTWorkspaceTitle $d.Workspace); Category = $d.Category; Title = $d.Title; HasRead = [bool]($m -and $m.PrimaryButton); ChangeCount = $changes }
+    }
+}
+
 function Get-HTSelfTestConnected {
     return @{ Graph = (Test-HTConnection -Service 'Graph'); Exchange = (Test-HTConnection -Service 'Exchange'); SharePoint = (Test-HTConnection -Service 'SharePoint'); AD = (Test-HTConnection -Service 'AD') }
 }
@@ -231,6 +262,7 @@ Register-HTModule -Workspace 'Organization' -Category 'Diagnostyka' -Key 'org.se
     $row2 = Add-HTToolbarRow -Module $m
     $m.C.Write = Add-HTCheckBox -Parent $row2 -Text 'Testy zapisu na obiektach testowych (tworzone i usuwane)' -Checked $false -ToolTip 'Tworzy obiekty «HT-Autotest-…», sprawdza zmianę i od razu je usuwa (także z kosza katalogu). Wymaga uprawnień do zmian.'
     $m.C.Slow = Add-HTCheckBox -Parent $row2 -Text 'Także długie (zespół Teams - do 5 min)' -Checked $false
+    $m.C.Sweep = Add-HTCheckBox -Parent $row2 -Text 'Wszystkie sekcje: przycisk odczytu w każdym module' -Checked $true -ToolTip 'Po testach - przegląd każdego modułu połączonych przestrzeni na przykładowym obiekcie (własne konto, skrzynka, zespół…). Okna są przechwytywane, nic się nie zmienia.'
     $row3 = Add-HTToolbarRow -Module $m
     Add-HTButton -Parent $row3 -Module $m -Text 'Uruchom autotest' -Icon 'E768' -Primary -OnClick {
         param($m)
@@ -268,10 +300,39 @@ Register-HTModule -Workspace 'Organization' -Category 'Diagnostyka' -Key 'org.se
             Stop-HTStoppable
             Set-HTBusy -Busy $false -Text "Autotest: $(Get-HTSelfTestSummary -Rows $results.ToArray())"
         }
+        if ((Test-HTChecked $m.C.Sweep) -and -not (Test-HTStopRequested)) {
+            $workspaces = @(Get-HTModuleDefinitions | ForEach-Object { $_.Workspace } | Select-Object -Unique)
+            Set-HTBusy -Busy $true -Text 'Przegląd wszystkich sekcji…'
+            Start-HTStoppable
+            try { Invoke-HTSelfTestSweep -Module $m -Results $results -Workspaces $workspaces }
+            finally { Stop-HTStoppable; Set-HTBusy -Busy $false -Text "Autotest: $(Get-HTSelfTestSummary -Rows $results.ToArray())" }
+        }
         $summary = Get-HTSelfTestSummary -Rows $results.ToArray()
         Add-HTCheckRecord -Module $m -Name 'Autotest funkcji' -Object (@($services | ForEach-Object { Get-HTSelfTestServiceName $_ }) -join ', ') -Details $summary
         $failed = @($results | Where-Object { $_.Status -eq 'Błąd' }).Count
         Show-HTToast "Autotest: $summary." $(if ($failed) { 'warn' } else { 'ok' }) 8
+    } | Out-Null
+    Add-HTButton -Parent $row3 -Module $m -Text 'Przegląd wybranych sekcji…' -Icon 'E8A9' -ToolTip 'Przycisk odczytu w każdym module wybranych przestrzeni (bez testów funkcji) - okna przechwytywane, bez zmian' -OnClick {
+        param($m)
+        $items = @(Get-HTModuleDefinitions | Group-Object Workspace | ForEach-Object { [PSCustomObject]@{ Przestrzeń = (Get-HTWorkspaceTitle $_.Name); Moduły = $_.Count; Klucz = $_.Name } })
+        $picked = @(Show-HTSelectionDialog -Title 'Przegląd sekcji' -Prompt 'Przestrzenie do przeglądu - w każdym module przycisk odczytu na przykładowym obiekcie.' -Items $items -MultiSelect -Icon 'E8A9' | Where-Object { $_ })
+        if (-not $picked.Count) { return }
+        Reset-HTResults -Module $m
+        $results = New-Object System.Collections.Generic.List[object]
+        Set-HTBusy -Busy $true -Text 'Przegląd sekcji…'
+        Start-HTStoppable
+        try { Invoke-HTSelfTestSweep -Module $m -Results $results -Workspaces @($picked | ForEach-Object { $_.Klucz }) }
+        finally { Stop-HTStoppable; Set-HTBusy -Busy $false -Text "Przegląd sekcji: $(Get-HTSelfTestSummary -Rows $results.ToArray())" }
+        $summary = Get-HTSelfTestSummary -Rows $results.ToArray()
+        Add-HTCheckRecord -Module $m -Name 'Przegląd sekcji' -Object (@($picked | ForEach-Object { $_.Przestrzeń }) -join ', ') -Details $summary
+        Show-HTToast "Przegląd sekcji: $summary." $(if (@($results | Where-Object { $_.Status -eq 'Błąd' }).Count) { 'warn' } else { 'ok' }) 8
+    } | Out-Null
+    Add-HTButton -Parent $row3 -Module $m -Text 'Pokrycie testami' -Icon 'E9D2' -ToolTip 'Każdy moduł programu: czy ma przycisk odczytu (przegląd sekcji), ile ma przycisków zmian i które testy zapisu go sprawdzają' -OnClick {
+        param($m)
+        Set-HTBusy -Busy $true -Text 'Pokrycie testami…'
+        try { $info = @(Get-HTModuleCoverageInfo) }
+        finally { Set-HTBusy -Busy $false -Text 'Gotowe' }
+        Invoke-HTQuery -Module $m -Name 'Pokrycie testami' -Service '' -Record None -ScriptBlock { Get-HTSelfTestCoverage -Modules $info }
     } | Out-Null
     Add-HTButton -Parent $row3 -Module $m -Text 'Lista testów' -Icon 'E8FD' -OnClick {
         param($m)

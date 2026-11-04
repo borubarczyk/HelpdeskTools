@@ -544,3 +544,22 @@ Describe "Informacje o witrynie SharePoint (PnP 3.x)" {
         $info.'Udostępnianie zewnętrzne' | Should -Be 'ExternalUserSharingOnly'
     }
 }
+
+Describe "Zaproszenie gościa - zablokowane w tenancie" {
+    It "błąd «Guest invitations not allowed» - opis po polsku, gdzie to włączyć" {
+        Mock -ModuleName GraphAPIM365Users Invoke-HTGraphRequest { throw 'Forbidden: Guest invitations not allowed for your company. Contact your company administrator for more details.' }
+        { New-HTM365GuestInvitation -Email 'jan@zew.pl' } | Should -Throw '*Ustawienia współpracy zewnętrznej*'
+    }
+}
+
+Describe "Odwołanie do listy SharePoint (tytuły przetłumaczone)" {
+    BeforeAll { Import-HTTestModule -Name "GraphAPISharePoint" }
+    It "identyfikator listy, gdy węzeł go zna (obiekt i hashtabela), inaczej tytuł" {
+        $id = [guid]::NewGuid().ToString()
+        Get-HTSPListRef -Node ([PSCustomObject]@{ ListTitle = 'Biblioteka stylów'; ListId = $id }) | Should -Be $id
+        Get-HTSPListRef -Node @{ ListTitle = 'Dokumenty'; ListId = $id } | Should -Be $id
+        Get-HTSPListRef -Node ([PSCustomObject]@{ ListTitle = 'Dokumenty' }) | Should -Be 'Dokumenty'
+        Get-HTSPListRef -Node @{ ListTitle = 'Dokumenty'; ListId = '' } | Should -Be 'Dokumenty'
+        Get-HTSPListId -Node ([PSCustomObject]@{ ListTitle = 'X'; ListId = 'nie-guid' }) | Should -Be ''
+    }
+}

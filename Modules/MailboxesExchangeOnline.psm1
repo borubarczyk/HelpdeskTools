@@ -227,6 +227,113 @@ function Add-HTMailboxPermission {
 }
 
 # Odebranie uprawnień
+#region Uprawnienia z listy (różne rodzaje dla różnych osób) i kopie wysłanych przez delegatów
+$script:MailboxPermissionTokens = [ordered]@{
+    FullAccess   = @('full', 'fullaccess', 'fa', 'pelny', 'pełny', 'pelnydostep', 'pełnydostęp', 'pd', 'dostep', 'dostęp')
+    SendAs       = @('sendas', 'sa', 'jako', 'wyslijjako', 'wyślijjako', 'wj')
+    SendOnBehalf = @('sendonbehalf', 'onbehalf', 'sob', 'wimieniu', 'imieniu', 'wyslijwimieniu', 'wyślijwimieniu', 'wi')
+}
+
+function ConvertFrom-HTMailboxPermissionType {
+    # Rodzaj uprawnienia z tekstu (np. «pełny», «Full», «jako», «w imieniu») albo $null
+    param([AllowEmptyString()][string]$Token)
+    $t = ($Token.ToLowerInvariant() -replace '[\s\-_«»"'']', '')
+    if (-not $t) { return $null }
+    if ($t -in 'all', 'wszystkie', 'komplet') { return @('FullAccess', 'SendAs', 'SendOnBehalf') }
+    foreach ($k in $script:MailboxPermissionTokens.Keys) { if ($script:MailboxPermissionTokens[$k] -contains $t) { return $k } }
+    return $null
+}
+
+function ConvertFrom-HTMailboxPermissionLines {
+    <#
+        Lista osób z uprawnieniami, jedna w linii: «adres; uprawnienia; automapowanie», np.
+          jan@firma.pl; pełny, jako; tak
+          anna@firma.pl; pełny; nie
+          piotr@firma.pl; w imieniu
+          ewa@firma.pl                      <- uprawnienia i automapowanie domyślne (-DefaultTypes, -DefaultAutoMapping)
+        Uprawnienia: pełny (Full / FullAccess), jako (SendAs), w imieniu (SendOnBehalf), wszystkie. Automapowanie: tak / nie
+        (dotyczy pełnego dostępu - czy skrzynka sama pojawi się w Outlooku). Zwraca User, Types, AutoMapping, Problem, Line.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Text, [string[]]$DefaultTypes = @('FullAccess'), [bool]$DefaultAutoMapping = $true)
+    $seen = @{}
+    foreach ($line in @(([string]$Text) -split '\r?\n')) {
+        $l = $line.Trim()
+        if (-not $l -or $l.StartsWith('#')) { continue }
+        $parts = @($l -split '\s*[;\t]\s*')
+        $user = $parts[0].Trim()
+        $problems = @()
+        if (-not $user -or $user -match '\s') { $problems += 'niepoprawny adres' }
+        $types = @()
+        if ($parts.Count -gt 1 -and $parts[1].Trim()) {
+            foreach ($tok in @($parts[1] -split '\s*[,+/]\s*' | Where-Object { $_.Trim() })) {
+                $t = ConvertFrom-HTMailboxPermissionType $tok
+                if ($t) { $types += $t } else { $problems += "nieznane uprawnienie «$($tok.Trim())»" }
+            }
+        }
+        else { $types = @($DefaultTypes) }
+        $types = @($types | Select-Object -Unique)
+        if (-not $types.Count -and -not $problems.Count) { $problems += 'brak uprawnień' }
+        $auto = $DefaultAutoMapping
+        if ($parts.Count -gt 2 -and $parts[2].Trim()) {
+            switch -Regex ($parts[2].Trim().ToLowerInvariant()) {
+                '^(tak|t|yes|y|1|true|auto|z|automap.*)$' { $auto = $true; break }
+                '^(nie|n|no|0|false|bez)$' { $auto = $false; break }
+                default { $problems += "automapowanie «$($parts[2].Trim())» - wpisz tak albo nie" }
+            }
+        }
+        $key = $user.ToLowerInvariant()
+        if ($user -and $seen.ContainsKey($key)) { $problems += 'osoba powtórzona na liście' }
+        elseif ($user) { $seen[$key] = $true }
+        [PSCustomObject]@{ User = $user; Types = @($types); AutoMapping = [bool]$auto; Problem = ($problems -join '; '); Line = $l }
+    }
+}
+
+function Get-HTMailboxPermissionLabel {
+    # Opis uprawnień do podsumowania, np. «pełny dostęp (bez automapowania), wyślij jako»
+    param([string[]]$Types = @(), [bool]$AutoMapping = $true)
+    @(foreach ($t in $Types) {
+            switch ($t) {
+                'FullAccess' { "pełny dostęp$(if (-not $AutoMapping) { ' (bez automapowania)' })" }
+                'SendAs' { 'wyślij jako' }
+                'SendOnBehalf' { 'wyślij w imieniu' }
+            }
+        }) -join ', '
+}
+
+function ConvertFrom-HTMailboxPermissionCsv {
+    # Plik CSV (kolumny: Uzytkownik / Email / User, Uprawnienia / Permissions, Automapowanie / AutoMapping) -> linie listy
+    param([Parameter(Mandatory)][string]$Path)
+    $rows = @(Import-Csv -LiteralPath $Path -Delimiter $(if ((Get-Content -LiteralPath $Path -TotalCount 1) -match ';') { ';' } else { ',' }))
+    foreach ($r in $rows) {
+        $get = { param([string[]]$Names) foreach ($n in $Names) { $p = $r.PSObject.Properties | Where-Object { $_.Name -ieq $n } | Select-Object -First 1; if ($p -and "$($p.Value)".Trim()) { return "$($p.Value)".Trim() } }; '' }
+        $user = & $get @('Uzytkownik', 'Użytkownik', 'Email', 'E-mail', 'User', 'Adres', 'UPN')
+        if (-not $user) { continue }
+        $perm = (& $get @('Uprawnienia', 'Permissions', 'Rodzaj', 'Type')) -replace ';', ','
+        $auto = & $get @('Automapowanie', 'AutoMapping', 'Automap')
+        (@($user, $perm, $auto) -join '; ').TrimEnd(' ', ';')
+    }
+}
+
+function Get-HTMailboxSentItemsCopy {
+    # Czy wiadomości wysłane przez delegatów («jako» / «w imieniu») trafiają też do Elementów wysłanych tej skrzynki
+    param([Parameter(Mandatory)][string]$Identity)
+    $m = Get-EXOMailbox -Identity $Identity -Properties MessageCopyForSentAsEnabled, MessageCopyForSendOnBehalfEnabled, RecipientTypeDetails -ErrorAction Stop
+    return [PSCustomObject]@{
+        Skrzynka                    = "$($m.PrimarySmtpAddress)"
+        Typ                         = "$($m.RecipientTypeDetails)"
+        'Kopia wysłanych «jako»'     = [bool]$m.MessageCopyForSentAsEnabled
+        'Kopia wysłanych «w imieniu»' = [bool]$m.MessageCopyForSendOnBehalfEnabled
+        __flag                      = $(if (-not $m.MessageCopyForSentAsEnabled -or -not $m.MessageCopyForSendOnBehalfEnabled) { 'warn' } else { '' })
+    }
+}
+
+function Set-HTMailboxSentItemsCopy {
+    # Kopie wiadomości wysłanych przez delegatów w Elementach wysłanych skrzynki (współdzielonej albo użytkownika)
+    param([Parameter(Mandatory)][string]$Identity, [bool]$SentAs = $true, [bool]$SendOnBehalf = $true)
+    Set-Mailbox -Identity $Identity -MessageCopyForSentAsEnabled $SentAs -MessageCopyForSendOnBehalfEnabled $SendOnBehalf -Confirm:$false -ErrorAction Stop
+}
+#endregion
+
 function Remove-HTMailboxPermission {
     param (
         [Parameter(Mandatory)][string]$Identity,

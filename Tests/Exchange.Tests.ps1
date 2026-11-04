@@ -129,3 +129,55 @@ Describe "Zestawienie skrzynki (wiersz = skrzynka)" {
         $row.__detail | Should -Be $detail
     }
 }
+
+Describe "Uprawnienia do skrzynki z listy (różne rodzaje dla różnych osób)" {
+    It "linie: uprawnienia, automapowanie, domyślne, błędy i powtórzenia" {
+        $text = "jan@firma.pl; pełny, jako; tak`r`nanna@firma.pl; Full; nie`r`npiotr@firma.pl; w imieniu`r`newa@firma.pl`r`n# komentarz`r`nmarek@firma.pl; wszystkie; bez`r`nzly adres; full`r`nx@firma.pl; cos`r`njan@firma.pl; jako"
+        $r = @(ConvertFrom-HTMailboxPermissionLines -Text $text -DefaultTypes @('FullAccess') -DefaultAutoMapping $true)
+        $r.Count | Should -Be 8
+        $r[0].Types | Should -Be @('FullAccess', 'SendAs')
+        $r[0].AutoMapping | Should -BeTrue
+        $r[1].Types | Should -Be @('FullAccess')
+        $r[1].AutoMapping | Should -BeFalse
+        $r[2].Types | Should -Be @('SendOnBehalf')
+        $r[3].Types | Should -Be @('FullAccess')
+        $r[4].Types | Should -Be @('FullAccess', 'SendAs', 'SendOnBehalf')
+        $r[4].AutoMapping | Should -BeFalse
+        $r[5].Problem | Should -Match 'niepoprawny adres'
+        $r[6].Problem | Should -Match 'nieznane uprawnienie'
+        $r[7].Problem | Should -Match 'powtórzona'
+        @($r | Select-Object -First 5 | Where-Object { $_.Problem }).Count | Should -Be 0
+    }
+    It "linia bez uprawnień i bez domyślnych - błąd «brak uprawnień»" {
+        (@(ConvertFrom-HTMailboxPermissionLines -Text 'jan@firma.pl' -DefaultTypes @())[0]).Problem | Should -Match 'brak uprawnień'
+    }
+    It "opis uprawnień do podsumowania" {
+        Get-HTMailboxPermissionLabel -Types @('FullAccess', 'SendAs') -AutoMapping $false | Should -Be 'pełny dostęp (bez automapowania), wyślij jako'
+    }
+    It "plik CSV (średnik albo przecinek) zamieniany na linie listy" {
+        $path = Join-Path $TestDrive 'uprawnienia.csv'
+        Set-Content -LiteralPath $path -Encoding utf8 -Value @('Uzytkownik;Uprawnienia;Automapowanie', 'jan@firma.pl;pełny,jako;nie', 'anna@firma.pl;;', ';pełny;tak')
+        $lines = @(ConvertFrom-HTMailboxPermissionCsv -Path $path)
+        $lines | Should -Be @('jan@firma.pl; pełny,jako; nie', 'anna@firma.pl')
+        $r = @(ConvertFrom-HTMailboxPermissionLines -Text ($lines -join "`n"))
+        $r[0].Types | Should -Be @('FullAccess', 'SendAs')
+        $r[0].AutoMapping | Should -BeFalse
+    }
+}
+
+Describe "Kopie wiadomości wysłanych przez delegatów" {
+    BeforeAll {
+        New-HTTestStub -Name "Set-Mailbox" -Parameters "Identity", "ForwardingSmtpAddress", "ForwardingAddress", "DeliverToMailboxAndForward", "Confirm", "MessageCopyForSentAsEnabled", "MessageCopyForSendOnBehalfEnabled", "GrantSendOnBehalfTo"
+        New-HTTestStub -Name "Get-EXOMailbox" -Parameters "Identity", "Properties"
+    }
+    It "ustawia obie kopie (domyślnie włączone) i odczytuje stan" {
+        Mock -ModuleName MailboxesExchangeOnline Set-Mailbox { }
+        Set-HTMailboxSentItemsCopy -Identity 'biuro@firma.pl'
+        Should -Invoke -ModuleName MailboxesExchangeOnline Set-Mailbox -Times 1 -ParameterFilter { $Identity -eq 'biuro@firma.pl' -and $MessageCopyForSentAsEnabled -eq $true -and $MessageCopyForSendOnBehalfEnabled -eq $true }
+        Mock -ModuleName MailboxesExchangeOnline Get-EXOMailbox { [PSCustomObject]@{ PrimarySmtpAddress = 'biuro@firma.pl'; RecipientTypeDetails = 'SharedMailbox'; MessageCopyForSentAsEnabled = $true; MessageCopyForSendOnBehalfEnabled = $false } }
+        $s = Get-HTMailboxSentItemsCopy -Identity 'biuro@firma.pl'
+        $s.'Kopia wysłanych «jako»' | Should -BeTrue
+        $s.'Kopia wysłanych «w imieniu»' | Should -BeFalse
+        $s.__flag | Should -Be 'warn'
+    }
+}

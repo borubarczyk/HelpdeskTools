@@ -22,7 +22,7 @@ $script:SPTreeEvents = @{
             $node.Items.Clear()
             Set-HTBusy -Busy $true -Text "Wczytywanie folderów: $($node.Tag.Title)…"
             try {
-                foreach ($folder in @(Get-HTSPSubFolders -ServerRelativeUrl $node.Tag.ServerRelativeUrl -ListTitle $node.Tag.ListTitle)) {
+                foreach ($folder in @(Get-HTSPSubFolders -ServerRelativeUrl $node.Tag.ServerRelativeUrl -ListTitle $node.Tag.ListTitle -ListId (Get-HTSPListId -Node $node.Tag))) {
                     [void]$node.Items.Add((New-HTTreeItem -Item $folder -Text $folder.Title -Icon 'E8B7' -Lazy))
                 }
             }
@@ -248,8 +248,8 @@ Register-HTModule -Workspace 'SharePoint' -Category 'Zawartość' -Key 'sp.files
     }
 }
 
-Register-HTModule -Workspace 'SharePoint' -Category 'Zawartość' -Key 'sp.newfolder' -Title 'Nowy folder' -Icon 'E8F4' `
-    -Description 'Tworzy folder w zaznaczonej bibliotece lub folderze (po utworzeniu można nadać mu osobne uprawnienia).' -Build {
+Register-HTModule -Workspace 'SharePoint' -Category 'Zawartość' -Key 'sp.newfolder' -Title 'Foldery: nowy i usuwanie' -Icon 'E8F4' `
+    -Description 'Tworzy folder w zaznaczonej bibliotece lub folderze (po utworzeniu można nadać mu osobne uprawnienia) i usuwa zaznaczone foldery z zawartością do kosza witryny. Kilka folderów: pola wyboru w drzewie, Shift + kliknięcie - zakres.' -Build {
     param($m)
     $row = Add-HTToolbarRow -Module $m -Title 'Nazwa folderu'
     $m.C.Name = Add-HTTextBox -Parent $row -Width 280
@@ -266,6 +266,25 @@ Register-HTModule -Workspace 'SharePoint' -Category 'Zawartość' -Key 'sp.newfo
         }
         $m.C.Name.Text = ''
     } | Out-Null
+    $row2 = Add-HTToolbarRow -Module $m
+    Add-HTButton -Parent $row2 -Module $m -Text 'Usuń zaznaczone foldery…' -Icon 'E74D' -Danger -ToolTip 'Foldery zaznaczone w drzewie (z zawartością) - do kosza witryny, przywrócenie do 93 dni' -OnClick {
+        param($m)
+        $targets = @(Get-HTChangeTargets -Module $m)
+        if (-not $targets.Count) { return }
+        $folders = @($targets | Where-Object { -not $_.IsLibrary })
+        $libs = @($targets | Where-Object { $_.IsLibrary })
+        if ($libs.Count) { Show-HTWarning "Pominięto biblioteki ($($libs.Count)): $(@($libs | ForEach-Object { $_.Title }) -join ', ') - biblioteki usuwa się w Struktura > Ustawienia bibliotek > «Usuń biblioteki…»." -Title 'Usuń foldery' }
+        if (-not $folders.Count) { return }
+        Invoke-HTTargetAction -Module $m -Name 'Usunięcie folderu' -Targets $folders -Danger -TypeToConfirm 'USUŃ' -Label { param($t) Get-HTSPNodeLabel $t } `
+            -Confirm 'Usunąć zaznaczone foldery razem z zawartością (pliki i podfoldery)? Trafią do kosza witryny - przywrócenie: Zawartość > Kosz witryny (do 93 dni).' -Action {
+            param($t)
+            Remove-HTSPFolder -Node $t
+            $p = Get-HTPanel 'spTree'
+            if ($p) { Remove-HTTreeItem -Panel $p -Item $t }
+            'Przeniesiono do kosza witryny'
+        }
+    } | Out-Null
+    Add-HTLabel -Parent $row2 -Hint -Text 'Kilka folderów: pola wyboru w drzewie po lewej (Shift + kliknięcie - zakres na tym samym poziomie).' | Out-Null
 }
 
 Register-HTModule -Workspace 'SharePoint' -Category 'Zawartość' -Key 'sp.recycle' -Title 'Kosz witryny' -Icon 'E74D' -Service 'SharePoint' `
@@ -445,7 +464,7 @@ Register-HTModule -Workspace 'SharePoint' -Category 'Zawartość' -Key 'sp.versi
         $keep = Get-HTNum $m.C.Keep
         Invoke-HTTargetQuery -Module $m -Name 'Wersje plików' -Label { param($t) Get-HTSPNodeLabel $t } -Action {
             param($t)
-            Get-HTFileVersionUsage -ListTitle $t.ListTitle -FolderServerRelativeUrl $(if ($t.IsLibrary) { '' } else { $t.ServerRelativeUrl }) -Keep $keep | Sort-Object 'Do odzyskania (MB)' -Descending
+            Get-HTFileVersionUsage -ListTitle (Get-HTSPListRef -Node $t) -FolderServerRelativeUrl $(if ($t.IsLibrary) { '' } else { $t.ServerRelativeUrl }) -Keep $keep | Sort-Object 'Do odzyskania (MB)' -Descending
         }
     } | Out-Null
     Add-HTButton -Parent $row -Module $m -Text 'Przytnij w całej witrynie…' -Icon 'E74D' -Danger -OnClick {
@@ -756,8 +775,13 @@ Register-HTModule -Workspace 'SharePoint' -Category 'Struktura' -Key 'sp.libsett
     } | Out-Null
     Add-HTButton -Parent $row -Module $m -Text 'Usuń biblioteki…' -Icon 'E74D' -Danger -OnClick {
         param($m)
-        $libs = @(Get-HTChangeTargets -Module $m | Where-Object { $_.IsLibrary })
-        if ($libs.Count -eq 0) { Show-HTWarning 'Zaznacz biblioteki w drzewie po lewej.'; return }
+        $selected = @(Get-HTChangeTargets -Module $m)
+        $libs = @($selected | Where-Object { $_.IsLibrary })
+        if ($libs.Count -eq 0) {
+            $text = if ($selected.Count) { 'Zaznaczone są foldery, nie biblioteki. Foldery usuwa się w Zawartość > «Foldery: nowy i usuwanie» > «Usuń zaznaczone foldery…».' } else { 'Zaznacz biblioteki w drzewie po lewej.' }
+            Show-HTWarning $text -Title 'Usuń biblioteki'
+            return
+        }
         Invoke-HTTargetAction -Module $m -Name 'Usunięcie biblioteki' -Targets $libs -Danger -TypeToConfirm 'USUŃ' -Label { param($t) Get-HTSPNodeLabel $t } `
             -Confirm 'Usunąć wybrane biblioteki razem z całą zawartością? Trafią do kosza witryny (przywrócenie: Zawartość > Kosz witryny, do 93 dni).' -Action { param($t) Remove-HTSPLibrary -Node $t; 'Przeniesiono do kosza' }
         $p = Get-HTPanel 'spTree'
@@ -1026,7 +1050,7 @@ Register-HTModule -Workspace 'SharePoint' -Category 'Zawartość' -Key 'sp.copym
     -Description 'Kopiowanie albo przenoszenie zaznaczonych folderów (z zawartością i historią wersji) do innej biblioteki, folderu albo witryny tego tenantu - np. archiwizacja zakończonych projektów. Pliki - prawy przycisk w modułach «Pliki» i «Wyszukiwanie plików».' -Build {
     param($m)
     $row = Add-HTToolbarRow -Module $m
-    Add-HTButton -Parent $row -Module $m -Text 'Kopiuj / przenieś zaznaczone…' -Icon 'E8C8' -Primary -OnClick {
+    Add-HTButton -Parent $row -Module $m -Text 'Kopiuj / przenieś zaznaczone…' -Icon 'E8C8' -Primary -Create -NoRowMenu -OnClick {
         param($m)
         $folders = @(Get-HTTargets -Module $m | Where-Object { -not $_.IsLibrary })
         if ($folders.Count -eq 0) { Show-HTWarning 'Zaznacz foldery w drzewie po lewej (całe biblioteki kopiuje się przez «Struktura folderów» albo narzędzia migracji).'; return }
@@ -1040,7 +1064,7 @@ Register-HTModule -Workspace 'SharePoint' -Category 'Zawartość' -Key 'sp.uploa
     param($m)
     $row = Add-HTToolbarRow -Module $m
     $m.C.Skip = Add-HTCheckBox -Parent $row -Text 'Pomiń pliki, które już są w SharePoint' -Checked $true
-    Add-HTButton -Parent $row -Module $m -Text 'Wybierz folder i wyślij…' -Icon 'E898' -Primary -OnClick {
+    Add-HTButton -Parent $row -Module $m -Text 'Wybierz folder i wyślij…' -Icon 'E898' -Primary -Create -NoRowMenu -OnClick {
         param($m)
         $target = @(Get-HTTargets -Module $m -Single)[0]
         if (-not $target) { return }

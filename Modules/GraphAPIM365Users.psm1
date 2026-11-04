@@ -1460,7 +1460,13 @@ function New-HTM365GuestInvitation {
         [string[]]$CcRecipients = @(),
         [string]$Language = 'pl-PL'
     )
-    $r = Invoke-HTGraphRequest -Uri 'invitations' -Method POST -Body (Get-HTGuestInvitationBody @PSBoundParameters)
+    try { $r = Invoke-HTGraphRequest -Uri 'invitations' -Method POST -Body (Get-HTGuestInvitationBody @PSBoundParameters) }
+    catch {
+        $text = "$($_.Exception.Message)"
+        if ($text -match '(?i)invitations? not allowed|not allowed for your company') { throw "Zaproszenia gości są wyłączone w tym tenancie - administrator włącza je w Entra ID > Identities zewnętrzne > Ustawienia współpracy zewnętrznej > «Ustawienia zaproszeń gości». (Microsoft: $text)" }
+        if ($text -match '(?i)domain.*(not allowed|blocked|denied)|block.*domain') { throw "Domena $(($Email -split '@')[-1]) jest zablokowana dla gości w ustawieniach współpracy zewnętrznej (lista dozwolonych / zablokowanych domen). (Microsoft: $text)" }
+        throw
+    }
     return [PSCustomObject]@{
         Email       = [string]$r.invitedUserEmailAddress
         DisplayName = [string]$r.invitedUserDisplayName

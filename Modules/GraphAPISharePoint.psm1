@@ -1,5 +1,5 @@
 ﻿# SharePoint Online przez PnP.PowerShell (połączenie: Connect-Module -Name PnP.PowerShell)
-# Węzeł drzewa (Node) to obiekt: @{ Title; ServerRelativeUrl; ListTitle; IsLibrary }
+# Węzeł drzewa (Node) to obiekt: @{ Title; ServerRelativeUrl; ListTitle; ListId; IsLibrary }
 
 # Adres względny bieżącej witryny (np. /sites/Dzial)
 function Get-HTSPWebUrl {
@@ -20,6 +20,28 @@ function ConvertTo-HTSPSiteRelativeUrl {
     return $ServerRelativeUrl.TrimStart("/")
 }
 
+function Get-HTSPListId {
+    # Identyfikator listy węzła (PSCustomObject albo hashtabela) albo pusty tekst
+    param([Parameter(Mandatory)][AllowNull()][object]$Node)
+    if ($null -eq $Node) { return '' }
+    $id = if ($Node -is [System.Collections.IDictionary]) { $Node['ListId'] } elseif ($Node.PSObject.Properties['ListId']) { $Node.ListId } else { $null }
+    $g = [guid]::Empty
+    if ($id -and [guid]::TryParse([string]$id, [ref]$g)) { return $g.ToString() }
+    return ''
+}
+
+function Get-HTSPListRef {
+    <#
+        Odwołanie do listy dla poleceń PnP (-Identity / -List): identyfikator listy, gdy węzeł go zna, inaczej tytuł.
+        Tytuł zwracany przez SharePoint bywa przetłumaczony (MUI, np. «Biblioteka stylów» zamiast «Style Library»)
+        i wtedy wyszukiwanie po tytule kończy się błędem «Lista … nie istnieje».
+    #>
+    param([Parameter(Mandatory)][object]$Node)
+    $id = Get-HTSPListId -Node $Node
+    if ($id) { return $id }
+    return [string]$(if ($Node -is [System.Collections.IDictionary]) { $Node['ListTitle'] } else { $Node.ListTitle })
+}
+
 # Biblioteki dokumentów witryny
 function Get-HTSPLibraries {
     $lists = Get-PnPList -ErrorAction Stop | Where-Object { $_.BaseTemplate -eq 101 -and -not $_.Hidden }
@@ -29,6 +51,7 @@ function Get-HTSPLibraries {
                 Title             = $_.Title
                 ServerRelativeUrl = $root.ServerRelativeUrl
                 ListTitle         = $_.Title
+                ListId            = [string]$_.Id
                 IsLibrary         = $true
                 ItemCount         = $_.ItemCount
             }
@@ -39,7 +62,8 @@ function Get-HTSPLibraries {
 function Get-HTSPSubFolders {
     param (
         [Parameter(Mandatory)][string]$ServerRelativeUrl,
-        [Parameter(Mandatory)][string]$ListTitle
+        [Parameter(Mandatory)][string]$ListTitle,
+        [string]$ListId = ''
     )
     $siteRelative = ConvertTo-HTSPSiteRelativeUrl -ServerRelativeUrl $ServerRelativeUrl
     return @(Get-PnPFolderItem -FolderSiteRelativeUrl $siteRelative -ItemType Folder -ErrorAction Stop |
@@ -50,6 +74,7 @@ function Get-HTSPSubFolders {
                     Title             = $_.Name
                     ServerRelativeUrl = $_.ServerRelativeUrl
                     ListTitle         = $ListTitle
+                    ListId            = $ListId
                     IsLibrary         = $false
                     ItemCount         = $_.ItemCount
                 }
@@ -60,7 +85,7 @@ function Get-HTSPSubFolders {
 function Get-HTSPSecurable {
     param ([Parameter(Mandatory)][object]$Node)
     if ($Node.IsLibrary) {
-        return Get-PnPList -Identity $Node.ListTitle -ErrorAction Stop
+        return Get-PnPList -Identity (Get-HTSPListRef -Node $Node) -ErrorAction Stop
     }
     $folder = Get-PnPFolder -Url $Node.ServerRelativeUrl -ErrorAction Stop
     return Get-PnPProperty -ClientObject $folder -Property ListItemAllFields
@@ -112,11 +137,11 @@ function Grant-HTSPPermission {
     )
     $target = if ($PrincipalType -eq "SharePointGroup") { @{ Group = $Principal } } else { @{ User = $Principal } }
     if ($Node.IsLibrary) {
-        Set-PnPListPermission -Identity $Node.ListTitle -AddRole $Role @target -ErrorAction Stop
+        Set-PnPListPermission -Identity (Get-HTSPListRef -Node $Node) -AddRole $Role @target -ErrorAction Stop
     }
     else {
         $siteRelative = ConvertTo-HTSPSiteRelativeUrl -ServerRelativeUrl $Node.ServerRelativeUrl
-        Set-PnPFolderPermission -List $Node.ListTitle -Identity $siteRelative -AddRole $Role @target -ErrorAction Stop
+        Set-PnPFolderPermission -List (Get-HTSPListRef -Node $Node) -Identity $siteRelative -AddRole $Role @target -ErrorAction Stop
     }
 }
 
@@ -130,11 +155,11 @@ function Revoke-HTSPPermission {
     $target = if ($isGroup) { @{ Group = $Assignment.Principal } } else { @{ User = $Assignment.LoginName } }
     foreach ($role in ($Assignment.Roles -split ",\s*" | Where-Object { $_ })) {
         if ($Node.IsLibrary) {
-            Set-PnPListPermission -Identity $Node.ListTitle -RemoveRole $role @target -ErrorAction Stop
+            Set-PnPListPermission -Identity (Get-HTSPListRef -Node $Node) -RemoveRole $role @target -ErrorAction Stop
         }
         else {
             $siteRelative = ConvertTo-HTSPSiteRelativeUrl -ServerRelativeUrl $Node.ServerRelativeUrl
-            Set-PnPFolderPermission -List $Node.ListTitle -Identity $siteRelative -RemoveRole $role @target -ErrorAction Stop
+            Set-PnPFolderPermission -List (Get-HTSPListRef -Node $Node) -Identity $siteRelative -RemoveRole $role @target -ErrorAction Stop
         }
     }
 }
@@ -148,10 +173,10 @@ function Set-HTSPInheritance {
     )
     if ($Node.IsLibrary) {
         if ($Inherit) {
-            Set-PnPList -Identity $Node.ListTitle -ResetRoleInheritance -ErrorAction Stop | Out-Null
+            Set-PnPList -Identity (Get-HTSPListRef -Node $Node) -ResetRoleInheritance -ErrorAction Stop | Out-Null
         }
         else {
-            Set-PnPList -Identity $Node.ListTitle -BreakRoleInheritance -CopyRoleAssignments:$CopyExisting -ErrorAction Stop | Out-Null
+            Set-PnPList -Identity (Get-HTSPListRef -Node $Node) -BreakRoleInheritance -CopyRoleAssignments:$CopyExisting -ErrorAction Stop | Out-Null
         }
         return
     }
@@ -231,9 +256,21 @@ function New-HTSPFolder {
         Title             = $folder.Name
         ServerRelativeUrl = $folder.ServerRelativeUrl
         ListTitle         = $ParentNode.ListTitle
+        ListId            = (Get-HTSPListId -Node $ParentNode)
         IsLibrary         = $false
         ItemCount         = 0
     }
+}
+
+function Remove-HTSPFolder {
+    # Usunięcie folderu z zawartością - do kosza witryny (przywrócenie do 93 dni), -Permanent: bez kosza
+    param([Parameter(Mandatory)][object]$Node, [switch]$Permanent)
+    if ($Node.IsLibrary) { throw 'To biblioteka, nie folder - biblioteki usuwa się w Struktura > Ustawienia bibliotek.' }
+    $url = ([string]$Node.ServerRelativeUrl).TrimEnd('/')
+    $leaf = $url.Substring($url.LastIndexOf('/') + 1)
+    $parent = ConvertTo-HTSPSiteRelativeUrl -ServerRelativeUrl $url.Substring(0, $url.LastIndexOf('/'))
+    if ($Permanent) { Remove-PnPFolder -Name $leaf -Folder $parent -Force -ErrorAction Stop }
+    else { Remove-PnPFolder -Name $leaf -Folder $parent -Recycle -Force -ErrorAction Stop | Out-Null }
 }
 
 # Pełny adres URL węzła (do otwarcia w przeglądarce)
@@ -318,7 +355,7 @@ function Get-HTSPUniqueNodes {
         catch { @{ Node = $node; Error = $_.Exception.Message } }
         if ($entry.Level -lt $Depth) {
             try {
-                foreach ($child in @(Get-HTSPSubFolders -ServerRelativeUrl $node.ServerRelativeUrl -ListTitle $node.ListTitle)) {
+                foreach ($child in @(Get-HTSPSubFolders -ServerRelativeUrl $node.ServerRelativeUrl -ListTitle $node.ListTitle -ListId (Get-HTSPListId -Node $node))) {
                     $queue.Enqueue(@{ Node = $child; Level = $entry.Level + 1 })
                 }
             }
