@@ -1136,6 +1136,7 @@ function Show-HTError {
     elseif ($ErrorObject -is [System.Exception]) { $ErrorObject.Message }
     elseif ($ErrorObject) { [string]$ErrorObject }
     else { '' }
+    if ($detail -and (Get-Command -Name Compress-HTErrorText -ErrorAction Ignore)) { $detail = Compress-HTErrorText -Text $detail }
     $message = if ($detail) { "$Text`r`n`r`n$detail" } else { $Text }
     Show-HTMessage -Text $message -Title 'Błąd' -Tone 'crit'
 }
@@ -7791,9 +7792,9 @@ function Get-HTSupportSections {
         if ($e -is [System.Management.Automation.ErrorRecord]) {
             $where = if ($e.InvocationInfo -and $e.InvocationInfo.ScriptName) { "$(Split-Path -Leaf $e.InvocationInfo.ScriptName):$($e.InvocationInfo.ScriptLineNumber)" } else { '' }
             $stack = @(([string]$e.ScriptStackTrace) -split "`r?`n" | Where-Object { $_ } | Select-Object -First 4) -join ' <- '
-            "$($e.Exception.GetType().Name): $($e.Exception.Message)$(if ($where) { " [$where]" })$(if ($stack) { " | $stack" })"
+            "$($e.Exception.GetType().Name): $(Compress-HTErrorText -Text $e.Exception.Message -MaxLength 800)$(if ($where) { " [$where]" })$(if ($stack) { " | $stack" })"
         }
-        else { "$($e.GetType().Name): $([string]$e)" }
+        else { "$($e.GetType().Name): $(Compress-HTErrorText -Text ([string]$e) -MaxLength 800)" }
     }
     $sections['Dziennik - ostatnie wpisy (80)'] = @($history | Select-Object -Last 80 | ForEach-Object { Format-HTLogEntry -Entry $_ })
     return $sections

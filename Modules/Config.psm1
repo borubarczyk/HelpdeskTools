@@ -35,7 +35,7 @@ function Get-HTDefaultConfig {
         LogPasswordGeneration     = $false
         LogClientIDForPnP         = $false
         LastUsedClientID          = $null
-        DefaultSharepointSite     = "https://contoso.sharepoint.com/sites/DefaultSite"
+        DefaultSharepointSite     = ""
         DefaultUsageLocation      = "PL"
         GraphScopes               = $script:DefaultGraphScopes
         ShowNotifications         = $true

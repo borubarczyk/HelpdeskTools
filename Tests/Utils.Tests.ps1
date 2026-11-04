@@ -418,3 +418,30 @@ Describe "Dane do zgłoszenia problemu" {
         $text.IndexOf('Program') | Should -BeLessThan $text.IndexOf('Ostatnie')
     }
 }
+
+Describe "Skracanie długich komunikatów błędów" {
+    It "lista dozwolonych wartości (ValidateSet) zastąpiona kilkoma pierwszymi i liczbą" {
+        $items = @(1..300 | ForEach-Object { "Prop$_" }) + @(1..40 | ForEach-Object { "Owner.X$_" })
+        $msg = "Cannot validate argument on parameter 'Includes'. The argument ""StorageQuota"" does not belong to the set ""$($items -join ',')"" specified by the ValidateSet attribute."
+        $r = Compress-HTErrorText -Text $msg
+        $r | Should -Match 'StorageQuota'
+        $r | Should -Match 'Prop1, Prop2'
+        $r | Should -Match 'wartości: 340'
+        $r | Should -Not -Match 'Prop200'
+        $r.Length | Should -BeLessThan 400
+    }
+    It "zwykły komunikat bez zmian, bardzo długi - przycięty z informacją" {
+        Compress-HTErrorText -Text 'Brak uprawnień' | Should -Be 'Brak uprawnień'
+        $long = Compress-HTErrorText -Text ('x' * 3000) -MaxLength 100
+        $long | Should -Match 'skrócono z 3000'
+        $long.Length | Should -BeLessThan 140
+    }
+    It "dziennik zapisuje skrócony komunikat" {
+        Clear-HTLogHistory
+        $items = @(1..300 | ForEach-Object { "Prop$_" })
+        Write-Log -Message "Błąd: argument nie należy do zestawu ""$($items -join ',')"" określonego przez atrybut ValidateSet." -Type 'Error'
+        $entry = @(Get-HTLogHistory)[-1]
+        $entry.Message | Should -Match 'wartości: 300'
+        $entry.Message.Length | Should -BeLessThan 400
+    }
+}

@@ -6,6 +6,24 @@ $script:LogHistory = [System.Collections.Generic.List[object]]::new()
 # Lista funkcji (scriptblocków) wywoływanych po każdym wpisie logu (np. odświeżenie zakładki "Logi")
 $script:LogSinks = [System.Collections.Generic.List[scriptblock]]::new()
 
+function Compress-HTErrorText {
+    <#
+        Skraca bardzo długie komunikaty błędów do czytelnej długości - np. listę setek dozwolonych wartości z błędu walidacji
+        parametru (ValidateSet, «does not belong to the set "…"») zastępuje kilkoma pierwszymi i liczbą wszystkich.
+    #>
+    param([AllowNull()][AllowEmptyString()][string]$Text, [int]$MaxLength = 1500)
+    if (-not $Text) { return $Text }
+    $result = [regex]::Replace($Text, '(?s)(the set|zestawu|zbioru) "([^"]{200,})"', {
+            param($m)
+            $all = @($m.Groups[2].Value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            $top = @($all | Where-Object { $_ -notmatch '\.' })
+            if (-not $top.Count) { $top = $all }
+            '{0} "{1}, … (wartości: {2})"' -f $m.Groups[1].Value, (@($top | Select-Object -First 10) -join ', '), $all.Count
+        })
+    if ($result.Length -gt $MaxLength) { $result = $result.Substring(0, $MaxLength) + " … (skrócono z $($Text.Length) znaków)" }
+    return $result
+}
+
 # Funkcja do logowania i zarządzania historią logów w aplikacji Helpdesk Tools
 function Write-Log {
     [CmdletBinding()]
@@ -21,6 +39,8 @@ function Write-Log {
 
     # Wpisy diagnostyczne tylko przy włączonym szczegółowym dzienniku (Ustawienia > Aplikacja)
     if ($Type -eq "Debug" -and -not $Global:DebugLogging) { return }
+    # Długie komunikaty błędów (np. pełna lista dozwolonych wartości parametru) - skrócone, żeby dziennik był czytelny
+    if ($Message.Length -gt 1500 -or $Message -match '(the set|zestawu|zbioru) "[^"]{200,}"') { $Message = Compress-HTErrorText -Text $Message -MaxLength 4000 }
     $level = switch -Wildcard ($Type) {
         "Info*" { "Info" }
         "Warn*" { "Warn" }

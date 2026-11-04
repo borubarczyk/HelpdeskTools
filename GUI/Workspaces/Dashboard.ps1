@@ -141,7 +141,7 @@ Register-HTModule -Workspace 'Dashboard' -Category 'Microsoft 365' -Key 'dash.me
 }
 
 Register-HTModule -Workspace 'Dashboard' -Category 'Program' -Key 'dash.env' -Title 'Moduły i środowisko' -Icon 'E90F' -Service '' `
-    -Description 'Weryfikacja pakietów: wersje PowerShell, .NET i modułów, zgodność modułów z tym PowerShell oraz konflikty bibliotek. Prawy przycisk - instalacja zgodnej lub najnowszej wersji.' -Build {
+    -Description 'Weryfikacja pakietów: wersje PowerShell, .NET i modułów względem wersji sprawdzonych z programem, zgodność z tym PowerShell i konflikty bibliotek. Prawy przycisk - instalacja sprawdzonej, zgodnej albo najnowszej wersji (w sprawdzonej wersji głównej).' -Build {
     param($m)
     $row = Add-HTToolbarRow -Module $m
     Add-HTButton -Parent $row -Module $m -Text 'Sprawdź' -Icon 'E9D9' -Primary -OnClick { param($m) Invoke-HTQuery -Module $m -Name 'Weryfikacja modułów' -ScriptBlock { Get-HTEnvironmentReport } } | Out-Null
@@ -152,6 +152,15 @@ Register-HTModule -Workspace 'Dashboard' -Category 'Program' -Key 'dash.env' -Ti
     Add-HTButton -Parent $row -Module $m -Text 'Folder dziennika' -Icon 'E838' -OnClick { param($m) $d = Get-HTLogDirectory; if ($d -and (Test-Path $d)) { Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f $d) } } | Out-Null
     Add-HTButton -Parent $row -Module $m -Text 'Folder eksportu' -Icon 'E838' -OnClick { param($m) Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f (Get-HTExportDirectory)) } | Out-Null
     $m.OnShow = { param($m) if ($m.Table.Rows.Count -eq 0) { Invoke-HTQuery -Module $m -Name 'Weryfikacja modułów' -ScriptBlock { Get-HTEnvironmentReport } } }
+    Add-HTRowAction -Module $m -Text 'Zainstaluj sprawdzoną wersję' -Icon 'E73E' -Action {
+        param($m, $rows)
+        $req = Get-HTModuleRequirements
+        $rows = @($rows | Where-Object { $_.Moduł -and $req.Contains([string]$_.Moduł) })
+        if (-not $rows.Count) { Show-HTWarning 'Zaznacz moduły Microsoft Graph, Exchange Online albo PnP.PowerShell.' -Title 'Sprawdzona wersja'; return }
+        Invoke-HTRowAction -Module $m -Name 'Instalacja sprawdzonej wersji modułu' -Service '' -Rows $rows -Label { param($r) "$($r.Moduł) $($req[[string]$r.Moduł].Tested)" } `
+            -Confirm 'Zainstalować wersje sprawdzone z programem (obok obecnych - inne skrypty mogą dalej używać swoich)? Program użyje ich przy następnym połączeniu; moduł już wczytany w tej sesji - po ponownym uruchomieniu.' `
+            -Action { param($r) "Zainstalowano $(Install-HTTestedModule -Name $r.Moduł)" } -Refresh { param($m) Invoke-HTModulePrimary $m }
+    }
     Add-HTRowAction -Module $m -Text 'Zainstaluj wersję zgodną z tym PowerShell' -Icon 'E896' -Action {
         param($m, $rows)
         foreach ($r in @($rows | Where-Object { $_.Moduł })) {
@@ -163,11 +172,19 @@ Register-HTModule -Workspace 'Dashboard' -Category 'Program' -Key 'dash.env' -Ti
         }
         Invoke-HTModulePrimary $m
     }
-    Add-HTRowAction -Module $m -Text 'Zainstaluj / zaktualizuj najnowszą wersję' -Icon 'E777' -Action {
+    Add-HTRowAction -Module $m -Text 'Zaktualizuj do najnowszej sprawdzonej wersji głównej' -Icon 'E777' -Action {
         param($m, $rows)
         $scope = if (Test-HTIsAdministrator) { 'AllUsers' } else { 'CurrentUser' }
-        Invoke-HTRowAction -Module $m -Name 'Instalacja modułu' -Service '' -Rows @($rows | Where-Object { $_.Moduł }) -Confirm "Zainstalować najnowsze wersje z PowerShell Gallery ($scope)? Najnowsza wersja może wymagać nowszego PowerShell - program wtedy użyje starszej zgodnej." `
-            -Label { param($r) $r.Moduł } -Action { param($r) Install-Module -Name $r.Moduł -Scope $scope -Repository PSGallery -Force -AllowClobber -AcceptLicense -ErrorAction Stop } -Refresh { param($m) Invoke-HTModulePrimary $m }
+        $req = Get-HTModuleRequirements
+        Invoke-HTRowAction -Module $m -Name 'Aktualizacja modułu' -Service '' -Rows @($rows | Where-Object { $_.Moduł }) -Confirm "Zainstalować najnowsze wersje z PowerShell Gallery ($scope) w sprawdzonej wersji głównej (np. PnP 3.x, nie 4.x)? Najnowsza wersja może wymagać nowszego PowerShell - program wtedy użyje starszej zgodnej." `
+            -Label { param($r) $r.Moduł } -Action {
+            param($r)
+            $limit = $req[[string]$r.Moduł]
+            if ($limit) { Install-Module -Name $r.Moduł -MaximumVersion "$($limit.MaxMajor).999.999" -Scope $scope -Repository PSGallery -Force -AllowClobber -AcceptLicense -ErrorAction Stop }
+            else { Install-Module -Name $r.Moduł -Scope $scope -Repository PSGallery -Force -AllowClobber -AcceptLicense -ErrorAction Stop }
+            Restore-HTSkippedModulePaths | Out-Null
+            'Zaktualizowano'
+        } -Refresh { param($m) Invoke-HTModulePrimary $m }
     }
 }
 

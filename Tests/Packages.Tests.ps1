@@ -89,6 +89,57 @@ Describe "Resolve-HTModuleVersion" {
     It "zgłasza brak modułu" {
         (Resolve-HTModuleVersion -Name "HT.Nieistniejacy.Modul").Status | Should -Be "Missing"
     }
+    It "wybiera najnowszą wersję ze sprawdzonego zakresu, nawet gdy zainstalowana jest nowsza wersja główna" {
+        Mock -ModuleName ModulesConnection Get-Module {
+            if ($ListAvailable) { @([PSCustomObject]@{ Name = 'PnP.PowerShell'; Version = [version]'4.1.0'; ModuleBase = 'C:\m\4.1.0'; Path = 'C:\m\4.1.0\PnP.psd1' }, [PSCustomObject]@{ Name = 'PnP.PowerShell'; Version = [version]'3.4.1'; ModuleBase = 'C:\m\3.4.1'; Path = 'C:\m\3.4.1\PnP.psd1' }, [PSCustomObject]@{ Name = 'PnP.PowerShell'; Version = [version]'2.12.0'; ModuleBase = 'C:\m\2.12.0'; Path = 'C:\m\2.12.0\PnP.psd1' }) }
+        }
+        Mock -ModuleName ModulesConnection Test-HTModuleCompatibility { [PSCustomObject]@{ Compatible = $true; RuntimeIssues = @(); LoadedIssues = @() } }
+        $r = Resolve-HTModuleVersion -Name 'PnP.PowerShell'
+        $r.Status | Should -Be 'Compatible'
+        "$($r.Module.Version)" | Should -Be '3.4.1'
+    }
+    It "gdy w zakresie nie ma wersji - używa zainstalowanej spoza zakresu" {
+        Mock -ModuleName ModulesConnection Get-Module { if ($ListAvailable) { @([PSCustomObject]@{ Name = 'PnP.PowerShell'; Version = [version]'2.12.0'; ModuleBase = 'C:\m\2.12.0'; Path = 'C:\m\2.12.0\PnP.psd1' }) } }
+        Mock -ModuleName ModulesConnection Test-HTModuleCompatibility { [PSCustomObject]@{ Compatible = $true; RuntimeIssues = @(); LoadedIssues = @() } }
+        "$((Resolve-HTModuleVersion -Name 'PnP.PowerShell').Module.Version)" | Should -Be '2.12.0'
+    }
+}
+
+Describe "Wymagane wersje modułów" {
+    It "każdy moduł ma wersję minimalną, maksymalną wersję główną i testowaną w zakresie" {
+        $req = Get-HTModuleRequirements
+        foreach ($name in 'Microsoft.Graph.Authentication', 'ExchangeOnlineManagement', 'PnP.PowerShell') {
+            $req.Contains($name) | Should -BeTrue -Because $name
+            Test-HTModuleVersionSupported -Name $name -Version $req[$name].Tested | Should -BeTrue -Because $name
+        }
+    }
+    It "zakres: minimalna wersja, wersja główna, przyrostek wydania wstępnego, moduł bez wymagań" {
+        Test-HTModuleVersionSupported -Name 'ExchangeOnlineManagement' -Version '3.7.2' | Should -BeTrue
+        Test-HTModuleVersionSupported -Name 'ExchangeOnlineManagement' -Version '3.7.1' | Should -BeFalse
+        Test-HTModuleVersionSupported -Name 'PnP.PowerShell' -Version '4.0.0' | Should -BeFalse
+        Test-HTModuleVersionSupported -Name 'Microsoft.Graph.Authentication' -Version '2.41.1-preview' | Should -BeTrue
+        Test-HTModuleVersionSupported -Name 'HT.Inny' -Version '0.1' | Should -BeTrue
+        Test-HTModuleVersionSupported -Name 'PnP.PowerShell' -Version $null | Should -BeFalse
+    }
+    It "ocena wersji: OK, starsza, nowsza wersja główna, brak" {
+        (Test-HTModuleVersion -Name 'PnP.PowerShell' -Version '3.4.1').Status | Should -Be 'OK'
+        (Test-HTModuleVersion -Name 'PnP.PowerShell' -Version '3.2.0').Text | Should -Match 'testowana 3.4.1'
+        (Test-HTModuleVersion -Name 'PnP.PowerShell' -Version '2.12.0').Text | Should -Match 'starsza'
+        (Test-HTModuleVersion -Name 'PnP.PowerShell' -Version '4.0.1').Text | Should -Match 'nowsza wersja główna'
+        (Test-HTModuleVersion -Name 'ExchangeOnlineManagement' -Version $null).Status | Should -Be 'Uwaga'
+    }
+    It "instalacja: sprawdzona wersja; gdy jej nie ma w galerii - najnowsza z wersji głównej" {
+        if (-not (Get-Command -Name Install-Module -ErrorAction Ignore)) { New-HTTestStub -Name 'Install-Module' -Parameters 'Name', 'Scope', 'Repository', 'RequiredVersion', 'MinimumVersion', 'MaximumVersion' -Switches 'Force', 'AllowClobber', 'AcceptLicense' }
+        Mock -ModuleName ModulesConnection Write-Log { }
+        Mock -ModuleName ModulesConnection Restore-HTSkippedModulePaths { }
+        Mock -ModuleName ModulesConnection Install-Module { }
+        Install-HTTestedModule -Name 'PnP.PowerShell' -Scope 'CurrentUser' | Should -Be ([version](Get-HTModuleRequirements)['PnP.PowerShell'].Tested)
+        Should -Invoke -ModuleName ModulesConnection Install-Module -Times 1 -ParameterFilter { $RequiredVersion -eq (Get-HTModuleRequirements)['PnP.PowerShell'].Tested }
+        Mock -ModuleName ModulesConnection Install-Module { if ($RequiredVersion) { throw 'No match was found' } }
+        Mock -ModuleName ModulesConnection Get-Module { if ($ListAvailable) { @([PSCustomObject]@{ Name = 'PnP.PowerShell'; Version = [version]'3.9.0' }) } }
+        Install-HTTestedModule -Name 'PnP.PowerShell' -Scope 'CurrentUser' | Should -Be ([version]'3.9.0')
+        Should -Invoke -ModuleName ModulesConnection Install-Module -Times 1 -ParameterFilter { $MaximumVersion -eq '3.999.999' }
+    }
 }
 
 Describe "Moduły w OneDrive (pliki tylko w chmurze)" {

@@ -9,6 +9,85 @@ $script:ModuleNameMap = @{
     "PnP.PowerShell"               = "PnP.PowerShell"
 }
 
+#region Wymagane wersje modułów (jedno miejsce)
+<#
+    Zakresy wersji modułów, z którymi program jest sprawdzony. Moduły Microsoft zmieniają zachowanie między wersjami
+    (np. PnP 3.x sprawdza -Includes listą właściwości, Exchange poniżej 3.7.2 loguje się w osobnym oknie), więc:
+      - brakujący moduł instaluje się w wersji Tested (jak na komputerze testowym), a gdy jej nie ma w galerii - w
+        najnowszej z tej samej wersji głównej,
+      - przy łączeniu wybierana jest najnowsza zainstalowana wersja z zakresu Min..MaxMajor.x zgodna z PowerShell,
+      - gdy zainstalowane są tylko wersje spoza zakresu - program proponuje doinstalować wersję Tested obok,
+      - Pulpit > «Moduły i środowisko» i autotest pokazują wersję względem zakresu.
+    Po sprawdzeniu programu z nowszą wersją wystarczy zmienić Tested (i MaxMajor przy nowej wersji głównej).
+#>
+$script:HTModuleRequirements = [ordered]@{
+    'Microsoft.Graph.Authentication' = @{ Min = '2.0.0'; MaxMajor = 2; Tested = '2.41.1'; Why = 'wersja 1.x ma inne polecenia logowania' }
+    'ExchangeOnlineManagement'       = @{ Min = '3.7.2'; MaxMajor = 3; Tested = '3.10.1'; Why = 'starsze wersje logują się w osobnym oknie zamiast w przeglądarce' }
+    'PnP.PowerShell'                 = @{ Min = '3.0.0'; MaxMajor = 3; Tested = '3.4.1'; Why = 'PnP 2.x ma inne parametry poleceń' }
+}
+
+# Moduły, dla których w tej sesji odmówiono instalacji sprawdzonej wersji (bez ponownego pytania przy każdym połączeniu)
+$script:HTDeclinedTestedModules = New-Object System.Collections.Generic.HashSet[string]
+
+function Get-HTModuleRequirements { return $script:HTModuleRequirements }
+
+function ConvertTo-HTModuleVersion {
+    # Wersja modułu bez przyrostka wydania wstępnego (2.41.1-preview -> 2.41.1)
+    param([AllowNull()][object]$Version)
+    if ($null -eq $Version -or "$Version" -eq '') { return $null }
+    $v = $null
+    if ([version]::TryParse(("$Version" -replace '-.*$', ''), [ref]$v)) { return $v }
+    return $null
+}
+
+function Test-HTModuleVersionSupported {
+    # Czy wersja jest w sprawdzonym zakresie (moduł bez wymagań - zawsze tak)
+    param([Parameter(Mandatory)][string]$Name, [AllowNull()][object]$Version)
+    $r = $script:HTModuleRequirements[$Name]
+    if (-not $r) { return $true }
+    $v = ConvertTo-HTModuleVersion $Version
+    if (-not $v) { return $false }
+    return ($v -ge [version]$r.Min -and $v.Major -le [int]$r.MaxMajor)
+}
+
+function Test-HTModuleVersion {
+    # Ocena wersji modułu względem sprawdzonego zakresu: Status OK / Uwaga i opis (raport środowiska, autotest)
+    param([Parameter(Mandatory)][string]$Name, [AllowNull()][object]$Version)
+    $r = $script:HTModuleRequirements[$Name]
+    if ($null -eq $Version -or "$Version" -eq '') { return [PSCustomObject]@{ Name = $Name; Status = 'Uwaga'; Text = "$Name - brak (zainstaluje się przy pierwszym połączeniu w wersji $(if ($r) { $r.Tested } else { 'najnowszej' }))" } }
+    if (-not $r) { return [PSCustomObject]@{ Name = $Name; Status = 'OK'; Text = "$Name $Version" } }
+    $v = ConvertTo-HTModuleVersion $Version
+    if ($v -and $v -lt [version]$r.Min) { return [PSCustomObject]@{ Name = $Name; Status = 'Uwaga'; Text = "$Name $Version - starsza niż sprawdzona $($r.Min)+$(if ($r.Why) { " ($($r.Why))" }); sprawdzona wersja: $($r.Tested) (Pulpit > Moduły i środowisko > «Zainstaluj sprawdzoną wersję»)" } }
+    if ($v -and $v.Major -gt [int]$r.MaxMajor) { return [PSCustomObject]@{ Name = $Name; Status = 'Uwaga'; Text = "$Name $Version - nowsza wersja główna niż sprawdzona ($($r.MaxMajor).x, testowana $($r.Tested)) - polecenia mogą działać inaczej; program użyje wersji $($r.MaxMajor).x, gdy jest zainstalowana" } }
+    return [PSCustomObject]@{ Name = $Name; Status = 'OK'; Text = "$Name $Version$(if ("$Version" -ne $r.Tested) { " (testowana $($r.Tested))" })" }
+}
+
+function Install-HTTestedModule {
+    <#
+        Instalacja sprawdzonej wersji modułu (Tested) obok innych wersji; gdy jej nie ma w PowerShell Gallery - najnowszej
+        z wersji głównej MaxMajor. Zwraca zainstalowaną wersję.
+    #>
+    param([Parameter(Mandatory)][string]$Name, [string]$Scope = '')
+    $r = $script:HTModuleRequirements[$Name]
+    if (-not $Scope) { $Scope = if (Test-HTIsAdministrator) { 'AllUsers' } else { 'CurrentUser' } }
+    $common = @{ Name = $Name; Scope = $Scope; Repository = 'PSGallery'; Force = $true; AllowClobber = $true; AcceptLicense = $true; ErrorAction = 'Stop' }
+    if (-not $r) { Install-Module @common; Restore-HTSkippedModulePaths | Out-Null; return (Get-Module -ListAvailable -Name $Name | Sort-Object Version -Descending | Select-Object -First 1).Version }
+    try {
+        Install-Module @common -RequiredVersion $r.Tested
+        $installed = [version]$r.Tested
+    }
+    catch {
+        Write-Log "Sprawdzona wersja $Name $($r.Tested) niedostępna ($($_.Exception.Message)) - instalacja najnowszej $($r.MaxMajor).x." "Warn"
+        Install-Module @common -MinimumVersion $r.Min -MaximumVersion "$($r.MaxMajor).999.999"
+        $installed = (Get-Module -ListAvailable -Name $Name | Where-Object { Test-HTModuleVersionSupported -Name $Name -Version $_.Version } | Sort-Object Version -Descending | Select-Object -First 1).Version
+    }
+    # PowerShellGet dopisuje do PSModulePath folder Dokumenty\PowerShell\Modules - ponowne pominięcie (OneDrive)
+    Restore-HTSkippedModulePaths | Out-Null
+    Write-Log "Zainstalowano moduł $Name $installed ($Scope)." "Info&Notification"
+    return $installed
+}
+#endregion
+
 # Sprawdzanie czy moduł jest zainstalowany
 function Test-ModulePresence {
     param ([string]$Name)
@@ -203,7 +282,8 @@ function Install-ModuleIfMissing {
     }
 
     Write-Log "Moduł '$actualName' nie jest zainstalowany." "Warn"
-    $approve = Show-Dialog -Title "Instalacja modułu" -Message "Moduł '$actualName' nie jest zainstalowany. Czy chcesz go zainstalować z PowerShell Gallery?" -Buttons "YesNo" -Type "Question"
+    $tested = if ($script:HTModuleRequirements[$actualName]) { " w sprawdzonej wersji $($script:HTModuleRequirements[$actualName].Tested)" } else { '' }
+    $approve = Show-Dialog -Title "Instalacja modułu" -Message "Moduł '$actualName' nie jest zainstalowany. Czy chcesz go zainstalować z PowerShell Gallery$tested?" -Buttons "YesNo" -Type "Question"
     if ($approve -ne "Yes") {
         Write-Log "Użytkownik anulował instalację modułu '$actualName'." "Warn"
         return $false
@@ -212,10 +292,7 @@ function Install-ModuleIfMissing {
     $scope = if (Test-HTIsAdministrator) { "AllUsers" } else { "CurrentUser" }
     try {
         Set-HTBusy -Busy $true -Text "Instalowanie modułu $actualName..."
-        Install-Module -Name $actualName -Scope $scope -AcceptLicense -Force -AllowClobber -Repository PSGallery -ErrorAction Stop
-        # PowerShellGet dopisuje do PSModulePath folder Dokumenty\PowerShell\Modules - ponowne pominięcie (OneDrive)
-        Restore-HTSkippedModulePaths | Out-Null
-        Write-Log "Moduł '$actualName' został pomyślnie zainstalowany ($scope)." "Info&Notification"
+        Install-HTTestedModule -Name $actualName -Scope $scope | Out-Null
         return $true
     }
     catch {
@@ -566,6 +643,8 @@ function Connect-Module {
                     try { $SiteUrl = (Get-PnPConnection -ErrorAction Stop).Url } catch { $SiteUrl = $null }
                 }
                 if (-not $SiteUrl) { $SiteUrl = $Global:DefaultSharepointSite }
+                # Przykładowy adres z dawnej konfiguracji domyślnej (contoso) - nie łączy się, tylko pyta o adres
+                if (Test-HTPlaceholderSiteUrl $SiteUrl) { $SiteUrl = $null }
 
                 $url = $SiteUrl
                 $clientId = if ($AppClientId) { $AppClientId } else { "$($Global:LastUsedClientID)" }
@@ -651,6 +730,9 @@ function Connect-Module {
         Write-Log "Błąd połączenia z '$Name': $($_.Exception.Message)" "Error&Notification"
         $hint = if ($Name -eq 'PnP.PowerShell' -and "$($_.Exception.Message)" -match '(?i)host not reachable|No such host|nie jest znany|name or service not known|could not be resolved') {
             "`n`nSprawdź adres witryny - powinien mieć postać https://firma.sharepoint.com/sites/Dzial (nie domena firma.onmicrosoft.com)."
+        }
+        elseif ($Name -eq 'PnP.PowerShell' -and "$($_.Exception.Message)" -match '(?i)NotFound|\b404\b|not found') {
+            "`n`nWitryna o tym adresie nie istnieje. Podaj adres istniejącej witryny (np. główną https://firma.sharepoint.com) albo kliknij «Wybierz witrynę» w oknie połączenia."
         }
         else { '' }
         Show-HTError -Text "Nie udało się połączyć z '$Name'.$hint" -ErrorObject $_
@@ -761,8 +843,15 @@ function Resolve-HTSharePointUrl {
 }
 
 # Okno połączenia z SharePoint: adres witryny (z listą witryn) i Client ID (z możliwością utworzenia aplikacji)
+function Test-HTPlaceholderSiteUrl {
+    # Przykładowy adres witryny (contoso - dawna wartość domyślna ustawień), który nie wskazuje prawdziwego tenantu
+    param([AllowNull()][AllowEmptyString()][string]$Url)
+    return ([string]$Url -match '(?i)^(https?://)?contoso(-admin)?\.sharepoint\.com(/|$)')
+}
+
 function Show-HTSharePointConnectDialog {
     param ([string]$Url, [string]$ClientId)
+    if (Test-HTPlaceholderSiteUrl $Url) { $Url = '' }
     if ($Url) { $Url = (Resolve-HTSharePointUrl -Url $Url).Url }
     return Show-HTFormDialog -Title "Połączenie z SharePoint" -Description "PnP PowerShell wymaga własnej rejestracji aplikacji w Entra ID (Client ID). Nie masz jej? Kliknij «Utwórz Client ID»." -OkText "Połącz" -Icon "E8F1" -Width 620 -Fields @(
         @{ Name = "Url"; Label = "Adres witryny"; Required = $true; Validation = "Url"; Default = $Url; Placeholder = "https://firma.sharepoint.com/sites/Dzial" }
@@ -1089,7 +1178,8 @@ function Resolve-HTModuleVersion {
     param ([Parameter(Mandatory)][string]$Name)
     $current = Get-Module -Name $Name | Sort-Object Version -Descending | Select-Object -First 1
     if ($current) { return [PSCustomObject]@{ Name = $Name; Status = 'Loaded'; Module = $current; Skipped = @(); Check = $null } }
-    $installed = @(Get-Module -ListAvailable -Name $Name | Sort-Object Version -Descending)
+    # Najpierw wersje ze sprawdzonego zakresu (Get-HTModuleRequirements), potem pozostałe - od najnowszej
+    $installed = @(Get-Module -ListAvailable -Name $Name | Sort-Object @{ Expression = { -not (Test-HTModuleVersionSupported -Name $Name -Version $_.Version) } }, @{ Expression = { $_.Version }; Descending = $true })
     if ($installed.Count -eq 0) { return [PSCustomObject]@{ Name = $Name; Status = 'Missing'; Module = $null; Skipped = @(); Check = $null } }
     $skipped = New-Object System.Collections.Generic.List[object]
     $firstCheck = $null
@@ -1177,6 +1267,21 @@ function Import-HTRequiredModule {
     if ($resolved.Skipped.Count -gt 0) {
         Write-Log "Pominięto wersje modułu $Name wymagające nowszego PowerShell: $(@($resolved.Skipped | ForEach-Object { $_.Version }) -join ', '). Używana wersja: $($resolved.Module.Version)." "Warn"
     }
+    if (-not (Test-HTModuleVersionSupported -Name $Name -Version $resolved.Module.Version) -and -not $script:HTDeclinedTestedModules.Contains($Name)) {
+        $r = $script:HTModuleRequirements[$Name]
+        $note = (Test-HTModuleVersion -Name $Name -Version $resolved.Module.Version).Text
+        Write-Log "Moduł $($note)." "Warn"
+        $answer = if (Get-Command -Name Show-Dialog -ErrorAction Ignore) { Show-Dialog -Title "Wersja modułu $Name" -Type "Question" -Buttons "YesNo" -Message "Zainstalowana wersja $Name $($resolved.Module.Version) jest spoza wersji sprawdzonych z programem ($($r.Min) - $($r.MaxMajor).x)$(if ($r.Why) { ": $($r.Why)" }).`n`nZainstalować sprawdzoną wersję $($r.Tested) (obok obecnej - inne skrypty mogą dalej używać swojej)?" } else { 'No' }
+        if ($answer -ne 'Yes') { [void]$script:HTDeclinedTestedModules.Add($Name) }
+        if ($answer -eq 'Yes') {
+            try {
+                Install-HTTestedModule -Name $Name | Out-Null
+                $again = Resolve-HTModuleVersion -Name $Name
+                if ($again.Status -eq 'Compatible' -and -not $again.Check.LoadedIssues.Count) { $resolved = $again }
+            }
+            catch { Write-Log "Instalacja sprawdzonej wersji $Name $($r.Tested): $($_.Exception.Message)" "Error" }
+        }
+    }
     Write-HTDebug { "Import modułu $Name $($resolved.Module.Version): $($resolved.Module.Path)" }
     Import-Module -Name $resolved.Module.Path -Global -ErrorAction Stop -WarningAction SilentlyContinue
     Write-Log "Zaimportowano moduł $Name $($resolved.Module.Version)." "Info"
@@ -1200,6 +1305,9 @@ function Install-HTCompatibleModule {
             if ([version]::TryParse([string]$_.Version, [ref]$v)) { [PSCustomObject]@{ Version = $v } }
         } | Sort-Object Version -Descending)
     if ($newestInstalled) { $candidates = @($candidates | Where-Object { $_.Version -le $newestInstalled }) }
+    # Najpierw wersje ze sprawdzonego zakresu (Get-HTModuleRequirements); spoza zakresu - tylko gdy w zakresie nie ma żadnej
+    $inRange = @($candidates | Where-Object { Test-HTModuleVersionSupported -Name $Name -Version $_.Version })
+    if ($inRange.Count) { $candidates = $inRange }
     $scope = if (Test-HTIsAdministrator) { "AllUsers" } else { "CurrentUser" }
     $tested = 0
     foreach ($candidate in $candidates) {
@@ -1244,20 +1352,27 @@ function Get-HTEnvironmentReport {
     foreach ($name in "Microsoft.Graph.Authentication", "ExchangeOnlineManagement", "PnP.PowerShell") {
         $installed = @(Get-Module -ListAvailable -Name $name | Sort-Object Version -Descending)
         $loaded = Get-Module -Name $name | Select-Object -First 1
+        $req = $script:HTModuleRequirements[$name]
+        $range = if ($req) { "$($req.Min) - $($req.MaxMajor).x (testowana $($req.Tested))" } else { '' }
         if ($installed.Count -eq 0) {
-            $rows.Add([PSCustomObject]@{ Składnik = $name; Wersja = ""; Stan = "Brak"; Szczegóły = "Zostanie zainstalowany przy pierwszym połączeniu."; Moduł = $name; __flag = "muted" })
+            $rows.Add([PSCustomObject]@{ Składnik = $name; Wersja = ""; Sprawdzone = $range; Stan = "Brak"; Szczegóły = "Zostanie zainstalowany przy pierwszym połączeniu$(if ($req) { " w sprawdzonej wersji $($req.Tested)" })."; Moduł = $name; __flag = "muted" })
             continue
         }
         $compatible = $null
         $issues = @()
-        foreach ($m in $installed) {
+        # Kolejność jak przy łączeniu (Resolve-HTModuleVersion): najpierw wersje ze sprawdzonego zakresu
+        $ordered = @($installed | Sort-Object @{ Expression = { -not (Test-HTModuleVersionSupported -Name $name -Version $_.Version) } }, @{ Expression = { $_.Version }; Descending = $true })
+        foreach ($m in $ordered) {
             $check = Test-HTModuleCompatibility -ModuleBase $m.ModuleBase
             if ($check.Compatible) { $compatible = $m; if (-not $loaded) { $issues = $check.LoadedIssues }; break }
             if (-not $issues) { $issues = $check.RuntimeIssues }
         }
-        $state = if ($loaded) { "Załadowany" } elseif (-not $compatible) { "Wymaga nowszego PowerShell" } elseif ($compatible.Version -ne $installed[0].Version) { "Używana starsza wersja" } elseif ($issues) { "Konflikt bibliotek" } else { "OK" }
+        $used = if ($loaded) { $loaded } else { $compatible }
+        $supported = $used -and (Test-HTModuleVersionSupported -Name $name -Version $used.Version)
+        $state = if ($loaded -and $supported) { "Załadowany" } elseif (-not $compatible -and -not $loaded) { "Wymaga nowszego PowerShell" } elseif (-not $supported) { "Spoza sprawdzonych wersji" } elseif ($compatible -and $compatible.Version -ne $installed[0].Version) { "Używana inna wersja" } elseif ($issues) { "Konflikt bibliotek" } else { "OK" }
         $detail = if (-not $compatible) { "Brak zainstalowanej zgodnej wersji. " + (@($issues | ForEach-Object { "$($_.Assembly) $($_.Required) (PowerShell ma $($_.Available))" }) -join "; ") }
-        elseif ($compatible.Version -ne $installed[0].Version) { "Najnowsza zainstalowana $($installed[0].Version) wymaga nowszego PowerShell - używana będzie $($compatible.Version)." }
+        elseif (-not $supported) { "$((Test-HTModuleVersion -Name $name -Version $used.Version).Text). Prawy przycisk - «Zainstaluj sprawdzoną wersję»." }
+        elseif ($compatible.Version -ne $installed[0].Version) { "Najnowsza zainstalowana $($installed[0].Version) $(if (Test-HTModuleVersionSupported -Name $name -Version $installed[0].Version) { 'wymaga nowszego PowerShell' } else { 'jest spoza sprawdzonych wersji' }) - używana będzie $($compatible.Version)." }
         elseif ($issues -and -not $loaded) { "Inny załadowany moduł ma starsze biblioteki: " + (@($issues | ForEach-Object { "$($_.Assembly) $($_.Available) < $($_.Required)" }) -join "; ") + ". Uruchom program ponownie i połącz najpierw z tą usługą." }
         else { "" }
         $rows.Add([PSCustomObject]@{
@@ -1265,11 +1380,12 @@ function Get-HTEnvironmentReport {
                 Wersja         = "$($installed[0].Version)"
                 Załadowana     = $(if ($loaded) { "$($loaded.Version)" } else { "" })
                 "Wersja zgodna" = $(if ($compatible) { "$($compatible.Version)" } else { "" })
+                Sprawdzone     = $range
                 Zainstalowane  = (@($installed | ForEach-Object { "$($_.Version)" } | Select-Object -Unique) -join ", ")
                 Stan           = $state
                 Szczegóły      = $detail
                 Moduł          = $name
-                __flag         = $(switch ($state) { "Wymaga nowszego PowerShell" { "crit" } "Konflikt bibliotek" { "warn" } "Używana starsza wersja" { "warn" } default { "" } })
+                __flag         = $(switch ($state) { "Wymaga nowszego PowerShell" { "crit" } "Konflikt bibliotek" { "warn" } "Spoza sprawdzonych wersji" { "warn" } "Używana inna wersja" { "warn" } default { "" } })
             })
     }
     $ad = Get-Module -ListAvailable -Name ActiveDirectory | Select-Object -First 1
