@@ -1566,7 +1566,8 @@ Register-HTSelfTest -Key 'ad.domain' -Name 'Domena Active Directory' -Service 'A
 # Obiekty testowe AD powstają w kontenerach domyślnych (Users, Computers) - zablokowane, usuwane po teście. Gdy kontenery
 # są w zakresie synchronizacji Entra Connect, konta testowe mogą na chwilę pojawić się w Entra ID (też zablokowane).
 Register-HTSelfTest -Key 'ad.w.objects' -Name 'Konta, grupa i komputer AD: utwórz, atrybuty, hasło, stan, grupy, przeniesienie, usuń' -Service 'AD' -Mode 'Write' -Area 'Active Directory' `
-    -Modules @('adu.new', 'adu.state', 'adu.edit', 'adu.password', 'adu.lockout', 'adu.groups', 'adu.offboard', 'adu.rep.inactive', 'adg.members', 'adg.manage', 'adc.manage') -Test {
+    -Modules @('adu.new', 'adu.state', 'adu.edit', 'adu.password', 'adu.lockout', 'adu.groups', 'adu.offboard', 'adg.members', 'adg.manage', 'adc.manage',
+        'adu.rep.inactive', 'adu.rep.never', 'adu.rep.expiring', 'adu.rep.expired', 'adu.rep.locked', 'adu.rep.disabled', 'adu.rep.neverexpires', 'adu.rep.accexpiring') -Test {
     param($ctx)
     $domain = Get-ADDomain -ErrorAction Stop
     $suffix = @(Get-HTADUpnSuffixes)[0]
@@ -1616,6 +1617,19 @@ Register-HTSelfTest -Key 'ad.w.objects' -Name 'Konta, grupa i komputer AD: utwó
         Set-HTADAccountExpiration -Identity $a.Guid -Date $null
         Assert-HTSelfTest (-not (& $user $a.Guid).AccountExpirationDate) 'Data wygaśnięcia nie została usunięta'
         Assert-HTSelfTest (@(Get-HTADLockoutStatus -Identity $a.Guid).Count) 'Brak stanu blokady z kontrolerów domeny'
+    }
+    # Raporty kont mają w menu wierszy «Odblokuj» i «Wyłącz konto» - na wierszu konta testowego z raportu
+    Invoke-HTSelfTestStep -Context $ctx -Step 'raporty kont (wyłączone, hasło nie wygasa, wygasające) i akcje wierszy' -Run {
+        Set-HTADPasswordNeverExpires -Identity $a.Guid -Value $true
+        Set-HTADAccountExpiration -Identity $a.Guid -Date (Get-Date).Date.AddDays(10)
+        foreach ($type in 'Disabled', 'PasswordNeverExpires', 'AccountExpiring') {
+            $row = @(Get-HTADUserReport -Type $type -Days 30 | Where-Object { [string]$_.ObjectGUID -eq $a.Guid })[0]
+            Assert-HTSelfTest $row "Konto testowe niewidoczne w raporcie $type"
+        }
+        Set-HTADAccountState -Identity $row.ObjectGUID -State Unlock
+        Set-HTADAccountState -Identity $row.ObjectGUID -State Disable
+        Set-HTADPasswordNeverExpires -Identity $a.Guid -Value $false
+        Set-HTADAccountExpiration -Identity $a.Guid -Date $null
     }
     Invoke-HTSelfTestStep -Context $ctx -Step 'grupy: dodanie, kopiowanie od wzorca, usunięcie' -Run {
         Add-HTADGroupMember -Group $groupGuid -Members @($a.Guid)
