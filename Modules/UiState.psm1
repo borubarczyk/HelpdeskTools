@@ -18,6 +18,7 @@ function New-HTUiStateDefault {
         LastWorkspace = ''
         LastModules   = @{}
         HiddenColumns = @{}
+        ExtraColumns  = @{}
         FilterPresets = @{}
         Window        = @{}
         LogHeight     = 200
@@ -42,7 +43,7 @@ function Get-HTUiState {
         catch { Write-Log -Message "Nie odczytano zapamiętanych ustawień interfejsu ($path): $($_.Exception.Message)" -Type "Warn" }
     }
     foreach ($k in 'Favorites', 'Recent') { $state[$k] = @($state[$k] | Where-Object { $_ } | ForEach-Object { [string]$_ }) }
-    foreach ($k in 'LastModules', 'HiddenColumns', 'FilterPresets', 'Window') { if ($state[$k] -isnot [System.Collections.IDictionary]) { $state[$k] = @{} } }
+    foreach ($k in 'LastModules', 'HiddenColumns', 'ExtraColumns', 'FilterPresets', 'Window') { if ($state[$k] -isnot [System.Collections.IDictionary]) { $state[$k] = @{} } }
     $script:UiState = $state
     return $state
 }
@@ -110,6 +111,24 @@ function Get-HTModuleHiddenColumns([string]$Key) {
     $h = (Get-HTUiState).HiddenColumns
     if ($h.Contains($Key)) { return @($h[$Key] | ForEach-Object { [string]$_ }) }
     return @()
+}
+
+# Dodatkowe kolumny z danymi modułu («Źródło|atrybut», ExtraColumns.psm1) - dopisywane po każdym odświeżeniu wyników
+function Get-HTModuleExtraColumns([string]$Key) {
+    $state = Get-HTUiState
+    if (-not $state.Contains('ExtraColumns') -or -not $state['ExtraColumns']) { return @() }
+    $h = $state['ExtraColumns']
+    if ($h.Contains($Key)) { return @($h[$Key] | ForEach-Object { [string]$_ } | Where-Object { $_ }) }
+    return @()
+}
+
+function Set-HTModuleExtraColumns {
+    param ([Parameter(Mandatory)][string]$Key, [AllowEmptyCollection()][string[]]$Columns = @())
+    $state = Get-HTUiState
+    if (-not $state.Contains('ExtraColumns') -or $state['ExtraColumns'] -isnot [System.Collections.IDictionary]) { $state['ExtraColumns'] = @{} }
+    $list = @($Columns | Where-Object { $_ } | Select-Object -Unique)
+    if ($list.Count) { $state['ExtraColumns'][$Key] = $list } else { [void]$state['ExtraColumns'].Remove($Key) }
+    Save-HTUiState
 }
 
 function Set-HTModuleHiddenColumns {

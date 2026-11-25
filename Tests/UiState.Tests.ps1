@@ -54,3 +54,13 @@ Describe "Zapamiętany stan interfejsu" {
         @(Get-HTFilterPresets "m1").Count | Should -Be 0
     }
 }
+
+Describe "Dodatkowe kolumny modułu" {
+    It "zapis, odczyt po ponownym wczytaniu i usunięcie" {
+        Set-HTModuleExtraColumns -Key 'm365.rep.mfa' -Columns @('M365User|jobTitle', 'M365User|jobTitle', 'M365User|createdDateTime')
+        Get-HTUiState -Reload | Out-Null
+        @(Get-HTModuleExtraColumns 'm365.rep.mfa') | Should -Be @('M365User|jobTitle', 'M365User|createdDateTime')
+        Set-HTModuleExtraColumns -Key 'm365.rep.mfa' -Columns @()
+        @(Get-HTModuleExtraColumns 'm365.rep.mfa').Count | Should -Be 0
+    }
+}

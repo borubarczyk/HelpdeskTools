@@ -597,6 +597,22 @@ Register-HTSelfTest -Key 'graph.sites' -Name 'Witryny SharePoint (wyszukiwanie G
     return "Witryn: $($sites.Count)"
 }
 
+Register-HTSelfTest -Key 'graph.extracols' -Name 'Dodatkowe kolumny: konta, grupy i urządzenia (wszystkie atrybuty)' -Service 'Graph' -Area 'Widoki' -Test {
+    $notes = New-Object System.Collections.Generic.List[string]
+    foreach ($key in 'M365User', 'M365Group') {
+        $src = Get-HTExtraColumnSource -Key $key
+        $attrs = @($src.Attributes.Keys | Where-Object { $_ -ne 'signInActivity' })
+        $data = Get-HTExtraColumnData -Source $key -Attributes $attrs -Refresh
+        Assert-HTSelfTest ($data.Count -gt 0) "$($src.Title): brak obiektów"
+        $notes.Add("$($src.Title): $($data.Count) (atrybutów: $($attrs.Count))")
+    }
+    $warn = ''
+    try { $d = Get-HTExtraColumnData -Source 'IntuneDevice' -Attributes @((Get-HTExtraColumnSource -Key 'IntuneDevice').Attributes.Keys) -Refresh; $notes.Add("urządzenia Intune: $($d.Count)") }
+    catch { $warn = "urządzenia Intune: $($_.Exception.Message)" }
+    if ($warn) { return @{ Status = 'Uwaga'; 'Szczegóły' = "$($notes -join '; '); $warn" } }
+    return ($notes -join '; ')
+}
+
 Register-HTSelfTest -Key 'graph.intune' -Name 'Urządzenia Intune' -Service 'Graph' -Area 'Intune' -Test {
     try { $s = Get-HTIntuneSummary }
     catch {
@@ -702,7 +718,7 @@ Register-HTSelfTest -Key 'graph.w.team' -Modules @('grp.team', 'm365.teams') -Na
     return Complete-HTSelfTestSteps -Context $ctx -Subject $name -Footer 'grupa usuwana po teście'
 }
 Register-HTSelfTest -Key 'graph.w.lifecycle' -Name 'Konta z CSV: MFA, licencje, grupy, porównanie, offboarding z kopią i przywrócenie' -Service 'Graph' -Mode 'Write' -Area 'Konta' `
-    -Modules @('m365.bulk', 'm365.mfa', 'm365.licenses', 'm365.reclaim', 'm365.licerr', 'm365.groups', 'm365.compare', 'm365.offboarding') -Test {
+    -Modules @('m365.bulk', 'm365.mfa', 'm365.licenses', 'm365.reclaim', 'm365.licerr', 'm365.groups', 'm365.compare', 'm365.offboarding', 'm365.rep.mfa') -Test {
     param($ctx)
     $me = Get-HTSelfTestMe -Context $ctx
     $domains = @(Get-HTM365Domains)
@@ -765,6 +781,16 @@ Register-HTSelfTest -Key 'graph.w.lifecycle' -Name 'Konta z CSV: MFA, licencje, 
         Assert-HTSelfTest $tap.temporaryAccessPass 'Brak kodu Temporary Access Pass'
         $m = Wait-HTSelfTestCondition -Context $ctx -Message 'Kod TAP niewidoczny w metodach' -Condition { @(Get-HTM365AuthMethods -Id $a.Id | Where-Object { $_.ApiPath -eq 'temporaryAccessPassMethods' })[0] }
         Remove-HTM365AuthMethod -UserId $a.Id -Method $m
+    }
+    Invoke-HTSelfTestStep -Context $ctx -Step 'MFA na koncie (per-user): włącz, wymuś, wyłącz' -Run {
+        Assert-HTSelfTestScopes -Scopes @('Policy.ReadWrite.AuthenticationMethod') -Feature 'Raporty > Rejestracja MFA > MFA na koncie'
+        $mfaState = { [string](Get-HTM365PerUserMfaStates -Ids @($a.Id))[$a.Id] }
+        foreach ($wanted in 'enabled', 'enforced', 'disabled') {
+            Set-HTM365PerUserMfaState -Id $a.Id -State $wanted
+            Wait-HTSelfTestCondition -Context $ctx -Message "MFA na koncie nie ma stanu $wanted" -Condition { (& $mfaState) -eq $wanted } | Out-Null
+        }
+        $row = @(Get-HTM365MfaRegistration -PerUserState | Where-Object { $_.Id -eq $a.Id })[0]
+        Assert-HTSelfTest ($row -and $row.Utworzono -and $row.'MFA na koncie' -eq 'Wyłączone') 'Raport Rejestracja MFA nie pokazuje konta testowego z datą utworzenia i stanem MFA na koncie'
     }
     Invoke-HTSelfTestStep -Context $ctx -Step 'licencja: przypisanie (wolna jednostka)' -Run {
         $sku = @(Get-HTSubscribedSkus -Force | Where-Object { $_.Available -gt 0 -and "$($_.Status)" -eq 'Enabled' } | Sort-Object Available -Descending)[0]
@@ -875,6 +901,16 @@ Register-HTSelfTest -Key 'exo.config' -Name 'Konfiguracja organizacji Exchange' 
     $domains = @(Get-AcceptedDomain -ErrorAction Stop)
     $org = Get-OrganizationConfig -ErrorAction Stop
     return "Domen akceptowanych: $($domains.Count); organizacja: $($org.DisplayName)"
+}
+
+Register-HTSelfTest -Key 'exo.extracols' -Name 'Dodatkowe kolumny: skrzynki (wszystkie atrybuty)' -Service 'Exchange' -Area 'Widoki' -Test {
+    param($ctx)
+    $src = Get-HTExtraColumnSource -Key 'Mailbox'
+    $data = Get-HTExtraColumnData -Source 'Mailbox' -Attributes @($src.Attributes.Keys) -Refresh
+    Assert-HTSelfTest ($data.Count -gt 0) 'Brak skrzynek'
+    $me = Get-HTSelfTestMailbox -Context $ctx
+    Assert-HTSelfTest $data.Index.ContainsKey($me.ToLowerInvariant()) "Skrzynka $me nie została dopasowana po adresie"
+    return "Skrzynek: $($data.Count), atrybutów: $($src.Attributes.Count); dopasowanie po adresie: $me"
 }
 
 Register-HTSelfTest -Key 'exo.w.distgroup' -Modules @('exo.dl', 'org.newgroup', 'exo.copyaccess') -Name 'Grupa dystrybucyjna: utwórz, członkowie, ustawienia, kopiowanie dostępu, usuń' -Service 'Exchange' -Mode 'Write' -Area 'Grupy' -Test {
@@ -1561,6 +1597,15 @@ Register-HTSelfTest -Key 'ad.domain' -Name 'Domena Active Directory' -Service 'A
     $d = Get-ADDomain -ErrorAction Stop
     $users = @(Get-ADUser -Filter * -ResultSetSize 5 -ErrorAction Stop)
     return "Domena $($d.DNSRoot) (poziom $($d.DomainMode)), odczyt kont: $($users.Count)"
+}
+
+Register-HTSelfTest -Key 'ad.extracols' -Name 'Dodatkowe kolumny: konta i komputery AD (wszystkie atrybuty)' -Service 'AD' -Area 'Widoki' -Test {
+    $notes = foreach ($key in 'ADUser', 'ADComputer') {
+        $src = Get-HTExtraColumnSource -Key $key
+        $data = Get-HTExtraColumnData -Source $key -Attributes @($src.Attributes.Keys) -Refresh
+        "$($src.Title): $($data.Count)"
+    }
+    return ($notes -join '; ')
 }
 
 # Obiekty testowe AD powstają w kontenerach domyślnych (Users, Computers) - zablokowane, usuwane po teście. Gdy kontenery
