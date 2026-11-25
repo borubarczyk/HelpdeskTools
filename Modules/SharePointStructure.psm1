@@ -616,7 +616,7 @@ function Set-HTSPLibrarySettings {
         $list = Get-PnPList -Identity $ref -ErrorAction Stop
         $list.OnQuickLaunch = [bool]$Settings['OnQuickLaunch']
         $list.Update()
-        Invoke-PnPQuery -ErrorAction Stop
+        Invoke-HTSPContextQuery -ClientObject $list
     }
     return "Zmieniono: $(@($Settings.Keys) -join ', ')"
 }
@@ -791,9 +791,7 @@ function Get-HTSPCheckedOutFiles {
     try {
         $list = Get-PnPList -Identity (Get-HTSPListRef -Node $Node) -ErrorAction Stop
         $files = $list.GetCheckedOutFiles()
-        $ctx = Get-PnPContext
-        $ctx.Load($files)
-        Invoke-PnPQuery -ErrorAction Stop
+        Invoke-HTSPContextQuery -ClientObject $files -Load
         $prefix = if ($Node.IsLibrary) { '' } else { ([string]$Node.ServerRelativeUrl).TrimEnd('/') + '/' }
         foreach ($f in $files) {
             $path = [string]$f.ServerRelativePath.DecodedUrl
@@ -822,13 +820,11 @@ function Invoke-HTSPCheckOutTakeover {
     param ([Parameter(Mandatory)][string]$ListTitle, [Parameter(Mandatory)][string]$Url)
     $list = Get-PnPList -Identity $ListTitle -ErrorAction Stop
     $files = $list.GetCheckedOutFiles()
-    $ctx = Get-PnPContext
-    $ctx.Load($files)
-    Invoke-PnPQuery -ErrorAction Stop
+    Invoke-HTSPContextQuery -ClientObject $files -Load
     $file = @($files | Where-Object { [string]$_.ServerRelativePath.DecodedUrl -ieq $Url })[0]
     if (-not $file) { throw "Nie znaleziono pliku $Url na liście plików bez wersji zaewidencjonowanej." }
     $file.TakeOverCheckOut()
-    Invoke-PnPQuery -ErrorAction Stop
+    Invoke-HTSPContextQuery -ClientObject $file
 }
 
 function Find-HTSPFiles {

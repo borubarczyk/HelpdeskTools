@@ -445,3 +445,18 @@ Describe "Skracanie długich komunikatów błędów" {
         $entry.Message.Length | Should -BeLessThan 400
     }
 }
+
+Describe "Ostrzeżenia poleceń w dzienniku" {
+    It "znane, nieszkodliwe ostrzeżenia Exchange - jako informacja; pozostałe - jako ostrzeżenie" {
+        Test-HTBenignWarning 'There are more results available than are currently displayed. To view them, increase the value for the ResultSize parameter.' | Should -BeTrue
+        Test-HTBenignWarning 'DateFormat "dd.MM.yyyy" isn''t valid for current language setting "pl-PL". Valid formats include "d.MM.yyyy, d MMM yyyy".' | Should -BeTrue
+        Test-HTBenignWarning 'Events from Email parameters of this cmdlet are deprecated. Use Get-EventsFromEmailConfiguration instead.' | Should -BeTrue
+        Test-HTBenignWarning 'The mailbox is on hold and cannot be removed.' | Should -BeFalse
+    }
+    It "zapisuje bez powtórzeń, z właściwym rodzajem wpisu" {
+        Mock -ModuleName Utils Write-Log { }
+        Write-HTCommandWarnings -Where 'Test' -Messages @('Events from Email parameters of this cmdlet are deprecated.', 'Events from Email parameters of this cmdlet are deprecated.', 'Coś poważnego')
+        Should -Invoke -ModuleName Utils Write-Log -Times 1 -ParameterFilter { $Type -eq 'Info' -and $Message -like 'Ostrzeżenie (Test): Events*(×2)' }
+        Should -Invoke -ModuleName Utils Write-Log -Times 1 -ParameterFilter { $Type -eq 'Warn' -and $Message -eq 'Ostrzeżenie (Test): Coś poważnego' }
+    }
+}

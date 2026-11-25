@@ -183,7 +183,35 @@ function Set-HTSPInheritance {
 
     $item = Get-HTSPSecurable -Node $Node
     if ($Inherit) { $item.ResetRoleInheritance() } else { $item.BreakRoleInheritance($CopyExisting, $false) }
-    Invoke-PnPQuery -ErrorAction Stop
+    Invoke-HTSPContextQuery -ClientObject $item
+}
+
+function Invoke-HTSPContextQuery {
+    <#
+        Wykonanie zapytania CSOM w kontekście, do którego należy obiekt. Obiekty zwracane przez polecenia PnP 3.x mogą
+        należeć do innego kontekstu niż Get-PnPContext / Invoke-PnPQuery - wtedy Load kończy się błędem «The object is
+        used in the context different from the one associated with the object», a zmiana (Update) nie trafia na serwer.
+        -Load: najpierw wczytanie obiektu (np. kolekcji plików).
+    #>
+    param([Parameter(Mandatory)][object]$ClientObject, [switch]$Load)
+    $ctx = $ClientObject.Context
+    if (-not $ctx) {
+        if ($Load) { (Get-PnPContext).Load($ClientObject) }
+        Invoke-PnPQuery -ErrorAction Stop
+        return
+    }
+    if ($Load) { $ctx.Load($ClientObject) }
+    # ExecuteQueryRetry z PnP.Framework (ponowienia przy ograniczaniu ruchu, bez zakleszczenia w wątku okna)
+    $ext = 'Microsoft.SharePoint.Client.ClientContextExtensions' -as [type]
+    $retry = if ($ext) { @($ext.GetMethods() | Where-Object { $_.Name -eq 'ExecuteQueryRetry' -and @($_.GetParameters()).Count -eq 3 })[0] } else { $null }
+    try {
+        if ($retry) { [void]$retry.Invoke($null, @($ctx, 10, $null)) } else { $ctx.ExecuteQuery() }
+    }
+    catch {
+        $inner = $_.Exception
+        while (($inner -is [System.Reflection.TargetInvocationException] -or $inner -is [System.Management.Automation.MethodInvocationException]) -and $inner.InnerException) { $inner = $inner.InnerException }
+        throw $inner
+    }
 }
 
 # Grupy SharePoint witryny

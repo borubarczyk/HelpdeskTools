@@ -148,3 +148,72 @@ Describe "Autotest: pokrycie modułów testami" {
         ($rows | Where-Object Klucz -eq 'mod.d').Pokrycie | Should -Be 'pełne'
     }
 }
+
+Describe "Autotest: kroki testów zapisu" {
+    It "błąd kroku nie przerywa kolejnych; wynik wymienia kroki udane i nieudane" {
+        $ctx = New-HTSelfTestContext -Sleep { }
+        Invoke-HTSelfTestStep -Context $ctx -Step 'pierwszy' -Run { 'a' } | Should -Be 'a'
+        Invoke-HTSelfTestStep -Context $ctx -Step 'drugi' -Run { throw 'zepsute' }
+        Invoke-HTSelfTestStep -Context $ctx -Step 'trzeci' -Run { 'c' } | Out-Null
+        $err = $null
+        try { Complete-HTSelfTestSteps -Context $ctx -Subject 'obiekt' } catch { $err = $_.Exception.Message }
+        $err | Should -Match 'Kroki z błędem: 1 z 3'
+        $err | Should -Match 'pierwszy, trzeci'
+        $err | Should -Match 'drugi - błąd: zepsute'
+        $ctx.Steps | Should -BeNullOrEmpty
+    }
+    It "krok opcjonalny, brak licencji i pominięcie dają «Uwaga», a nie błąd" {
+        $ctx = New-HTSelfTestContext -Sleep { }
+        Invoke-HTSelfTestStep -Context $ctx -Step 'archiwum' -Optional -Run { throw 'replikacja' }
+        Invoke-HTSelfTestStep -Context $ctx -Step 'blokada' -Run { throw "The mailbox doesn't have the required license to enable this feature" }
+        Invoke-HTSelfTestStep -Context $ctx -Step 'foldery' -Run { Skip-HTSelfTest 'brak folderu' }
+        $r = Complete-HTSelfTestSteps -Context $ctx -Subject 'obiekt'
+        $r.Status | Should -Be 'Uwaga'
+        $r['Szczegóły'] | Should -Match 'archiwum - uwaga: replikacja'
+        $r['Szczegóły'] | Should -Match 'foldery - pominięto: brak folderu'
+    }
+    It "zmienne testu są widoczne w krokach; same udane kroki - tekst" {
+        $ctx = New-HTSelfTestContext -Sleep { }
+        $address = 'skrzynka@contoso.pl'
+        $seen = @{}
+        Invoke-HTSelfTestStep -Context $ctx -Step 'odczyt' -Run { $seen.Address = $address }
+        $seen.Address | Should -Be $address
+        Complete-HTSelfTestSteps -Context $ctx -Subject 'obiekt' -Footer 'usuwany' | Should -Match '^obiekt - kroki OK \(1/1\): odczyt - usuwany$'
+    }
+    It "kroki z poprzedniego, przerwanego testu nie trafiają do następnego" {
+        Register-HTSelfTest -Key 'zz.steps1' -Name 'Przerwany' -Service 'Lokalnie' -Area 'Test' -Test { param($ctx) Invoke-HTSelfTestStep -Context $ctx -Step 'zły' -Run { throw 'x' }; throw 'przerwano' }
+        Register-HTSelfTest -Key 'zz.steps2' -Name 'Kolejny' -Service 'Lokalnie' -Area 'Test' -Test { param($ctx) Invoke-HTSelfTestStep -Context $ctx -Step 'dobry' -Run { 1 } | Out-Null; Complete-HTSelfTestSteps -Context $ctx }
+        $rows = @(Invoke-HTSelfTest -Tests @(Get-HTSelfTests -Key 'zz.steps1', 'zz.steps2') -Context (New-HTSelfTestContext -Sleep { }))
+        $rows[0].Status | Should -Be 'Błąd'
+        $rows[1].Status | Should -Be 'OK'
+        $rows[1].Szczegóły | Should -Not -Match 'zły'
+    }
+}
+
+Describe "Autotest: moduły bez testu zapisu" {
+    It "moduł ze zmianami niemożliwymi do testu ma powód zamiast «tylko odczyt»" {
+        Register-HTSelfTestExemption -Modules 'mod.x' -Reason 'Wymaga prawdziwego urządzenia'
+        $rows = @(Get-HTSelfTestCoverage -Modules @([PSCustomObject]@{ Key = 'mod.x'; Workspace = 'W'; Category = 'K'; Title = 'X'; HasRead = $true; ChangeCount = 1 }))
+        $rows[0].Pokrycie | Should -Be 'zmiany bez testu'
+        $rows[0].'Bez testu zapisu' | Should -Match 'urządzenia'
+    }
+    It "wyjątki dotyczą istniejących modułów, które nie mają testu zapisu" {
+        $root = Split-Path -Parent $PSScriptRoot
+        $keys = @(Get-ChildItem -Path (Join-Path $root 'GUI') -Recurse -Filter *.ps1 | ForEach-Object { [regex]::Matches((Get-Content -LiteralPath $_.FullName -Raw), "-Key '([a-z0-9\.]+)'") | ForEach-Object { $_.Groups[1].Value } } | Select-Object -Unique)
+        $tested = @(Get-HTSelfTests -IncludeWrite -IncludeSlow | ForEach-Object { $_.Modules })
+        foreach ($k in @((Get-HTSelfTestExemptions).Keys | Where-Object { $_ -notlike 'mod.*' })) {
+            $keys | Should -Contain $k -Because "wyjątek $k"
+            $tested | Should -Not -Contain $k -Because "$k ma test zapisu - wyjątek zbędny"
+        }
+    }
+}
+
+Describe "Autotest: pozostałości Exchange" {
+    It "usuwa tylko obiekty z prefiksem (bez względu na wielkość liter) i zna nowe rodzaje" {
+        { Remove-HTSelfTestLeftover -Item ([PSCustomObject]@{ Obiekt = 'Jan Kowalski'; __kind = 'MailContact'; Id = '1' }) } | Should -Throw '*nie jest obiekt testowy*'
+        if (-not (Get-Command -Name Remove-HTTenantAllowBlockItem -ErrorAction SilentlyContinue)) { New-HTTestStub -Name 'Remove-HTTenantAllowBlockItem' -Parameters 'ListType', 'Ids' }
+        Mock -ModuleName TenantSelfTest Remove-HTTenantAllowBlockItem { }
+        Remove-HTSelfTestLeftover -Item ([PSCustomObject]@{ Obiekt = 'ht-autotest-20260101-000000-nadawca@example.com'; __kind = 'AllowBlockSender'; Id = 'abc' })
+        Should -Invoke -ModuleName TenantSelfTest Remove-HTTenantAllowBlockItem -Times 1 -ParameterFilter { $ListType -eq 'Sender' -and $Ids -contains 'abc' }
+    }
+}

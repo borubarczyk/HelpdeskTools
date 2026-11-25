@@ -750,13 +750,13 @@ Register-HTModule -Workspace 'Exchange' -Category 'Sale i zasoby' -Key 'exo.book
     $row = Add-HTToolbarRow -Module $m
     Add-HTButton -Parent $row -Module $m -Text 'Pokaż ustawienia' -Icon 'E8A1' -Primary -OnClick {
         param($m)
-        Invoke-HTTargetQuery -Module $m -Name 'Ustawienia rezerwacji' -Label { param($t) Get-HTMailboxLabel $t } -Action { param($t) Get-HTRoomBookingSettings -Identity $t.PrimarySmtpAddress }
+        Invoke-HTTargetQuery -Module $m -Name 'Ustawienia rezerwacji' -Label { param($t) Get-HTMailboxLabel $t } -Action { param($t) Get-HTRoomBookingSettings -Identity $t.PrimarySmtpAddress -RecipientTypeDetails "$($t.RecipientTypeDetails)" }
     } | Out-Null
     Add-HTButton -Parent $row -Module $m -Text 'Zmień ustawienia…' -Icon 'E70F' -Danger -OnClick {
         param($m)
         $targets = @(Get-HTChangeTargets -Module $m)
         if ($targets.Count -eq 0) { return }
-        $current = if ($targets.Count -eq 1) { (Get-HTRoomBookingSettings -Identity $targets[0].PrimarySmtpAddress).__settings } else { $null }
+        $current = if ($targets.Count -eq 1) { (Get-HTRoomBookingSettings -Identity $targets[0].PrimarySmtpAddress -RecipientTypeDetails "$($targets[0].RecipientTypeDetails)").__settings } else { $null }
         $keep = '(bez zmian)'
         $boolField = { param($name, $label) @{ Name = $name; Label = $label; Type = 'Combo'; Options = @($keep, 'Tak', 'Nie'); Default = $(if ($current) { if ($current.$name) { 'Tak' } else { 'Nie' } } else { $keep }) } }
         $form = Show-HTFormDialog -Title 'Ustawienia rezerwacji' -Description $(if ($targets.Count -eq 1) { Get-HTMailboxLabel $targets[0] } else { "Sal i zasobów: $($targets.Count) - zmienione zostaną tylko ustawione pola" }) -Icon 'E787' -Width 620 -Fields @(

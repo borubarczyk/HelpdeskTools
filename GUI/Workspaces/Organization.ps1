@@ -241,7 +241,8 @@ function Get-HTModuleCoverageInfo {
     # Opisy modułów do pokrycia testami: czy jest przycisk odczytu i ile przycisków zmian (moduły budowane bez pokazywania)
     foreach ($d in @(Get-HTModuleDefinitions)) {
         $m = Get-HTModuleInstance -Key $d.Key
-        $changes = if ($m) { @($m.ChangeButtons).Count + @($m.RowActions | Where-Object { $_.Danger }).Count } else { 0 }
+        # @($null).Count to 1 - liczniki tylko z istniejących wpisów
+        $changes = if ($m) { [int]$m['ChangeButtonCount'] + @($m.RowActions | Where-Object { $_ -and $_.Danger }).Count } else { 0 }
         [PSCustomObject]@{ Key = $d.Key; Workspace = (Get-HTWorkspaceTitle $d.Workspace); Category = $d.Category; Title = $d.Title; HasRead = [bool]($m -and $m.PrimaryButton); ChangeCount = $changes }
     }
 }
@@ -327,7 +328,7 @@ Register-HTModule -Workspace 'Organization' -Category 'Diagnostyka' -Key 'org.se
         Add-HTCheckRecord -Module $m -Name 'Przegląd sekcji' -Object (@($picked | ForEach-Object { $_.Przestrzeń }) -join ', ') -Details $summary
         Show-HTToast "Przegląd sekcji: $summary." $(if (@($results | Where-Object { $_.Status -eq 'Błąd' }).Count) { 'warn' } else { 'ok' }) 8
     } | Out-Null
-    Add-HTButton -Parent $row3 -Module $m -Text 'Pokrycie testami' -Icon 'E9D2' -ToolTip 'Każdy moduł programu: czy ma przycisk odczytu (przegląd sekcji), ile ma przycisków zmian i które testy zapisu go sprawdzają' -OnClick {
+    Add-HTButton -Parent $row3 -Module $m -Text 'Pokrycie testami' -Icon 'E9D2' -ToolTip 'Każdy moduł programu: czy ma przycisk odczytu (przegląd sekcji), ile ma przycisków zmian, które testy zapisu go sprawdzają, a gdy zmian nie da się bezpiecznie przetestować - dlaczego' -OnClick {
         param($m)
         Set-HTBusy -Busy $true -Text 'Pokrycie testami…'
         try { $info = @(Get-HTModuleCoverageInfo) }
@@ -336,7 +337,7 @@ Register-HTModule -Workspace 'Organization' -Category 'Diagnostyka' -Key 'org.se
     } | Out-Null
     Add-HTButton -Parent $row3 -Module $m -Text 'Lista testów' -Icon 'E8FD' -OnClick {
         param($m)
-        $rows = @(Get-HTSelfTests -IncludeWrite -IncludeSlow | ForEach-Object { [PSCustomObject]@{ Test = $_.Name; Usługa = Get-HTSelfTestServiceName $_.Service; Rodzaj = $(if ($_.Mode -eq 'Write') { 'zapis' } else { 'odczyt' }); Obszar = $_.Area; Długi = $_.Slow; Opis = $_.Description; Klucz = $_.Key } })
+        $rows = @(Get-HTSelfTests -IncludeWrite -IncludeSlow | ForEach-Object { [PSCustomObject]@{ Test = $_.Name; Usługa = Get-HTSelfTestServiceName $_.Service; Rodzaj = $(if ($_.Mode -eq 'Write') { 'zapis' } else { 'odczyt' }); Obszar = $_.Area; Długi = $_.Slow; 'Sprawdzane moduły' = (@($_.Modules) -join ', '); Opis = $_.Description; Klucz = $_.Key } })
         Show-HTDataViewer -Title 'Testy autotestu' -Data $rows -Description 'Testy odczytu niczego nie zmieniają. Testy zapisu tworzą obiekty «HT-Autotest-…» i usuwają je po sprawdzeniu.' -ExportName 'autotest_lista' -Icon 'E8FD'
     } | Out-Null
     Add-HTButton -Parent $row3 -Module $m -Text 'Pozostałości po testach' -Icon 'E721' -ToolTip 'Obiekty «HT-Autotest-…», które zostały w tenancie (np. po zamknięciu programu w trakcie testu)' -OnClick {

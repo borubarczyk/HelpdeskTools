@@ -706,9 +706,9 @@ function Get-HTUserMailboxAccess {
         }
     }
 
-    $sendAs = @()
-    try { $sendAs = @(Get-EXORecipientPermission -Trustee $User -ResultSize Unlimited -ErrorAction Stop) }
-    catch { $sendAs = @(Get-RecipientPermission -Trustee $User -ResultSize Unlimited -ErrorAction Stop) }
+    # Wyślij jako we wszystkich skrzynkach: Get-EXORecipientPermission przyjmuje -Trustee tylko razem z -Identity
+    # («Trustee parameter can be used only with Identity…»), więc dla całej organizacji - Get-RecipientPermission
+    $sendAs = @(Get-RecipientPermission -Trustee $User -ResultSize Unlimited -ErrorAction Stop)
     foreach ($p in $sendAs) {
         if ($p.IsInherited -or @($p.AccessRights) -notcontains "SendAs") { continue }
         $result.Add([PSCustomObject]@{ Skrzynka = "$($p.Identity)"; Adres = "$($p.Identity)"; Typ = ""; Uprawnienie = "SendAs" })
@@ -825,7 +825,19 @@ function Get-HTQuarantinePreview {
     return "Od: $($preview.Sender)`nDo: $(@($preview.To) -join ', ')`nTemat: $($preview.Subject)`nData: $($preview.ReceivedTime)`n`n$($text.Trim())"
 }
 
-# Elementy możliwe do odzyskania (Recoverable Items) - wymaga roli Mailbox Import Export
+# Elementy możliwe do odzyskania (Recoverable Items) - wymaga roli Mailbox Import Export. Bez niej Exchange Online nie
+# udostępnia w sesji poleceń Get-/Restore-RecoverableItems («The term … is not recognized»).
+$script:RecoverableItemsRoleHint = 'Konto nie ma roli «Mailbox Import Export» - Exchange Online nie udostępnia bez niej poleceń elementów do odzyskania. Nadaj rolę w Exchange admin center > Role > Role administratora (np. grupa ról «Organization Management» > Uprawnienia > dodaj «Mailbox Import Export»), odczekaj kilka minut, rozłącz i połącz ponownie Exchange.'
+
+function Invoke-HTRecoverableItemsCommand {
+    param([Parameter(Mandatory)][scriptblock]$ScriptBlock)
+    try { & $ScriptBlock }
+    catch {
+        if ($_.Exception -is [System.Management.Automation.CommandNotFoundException] -or "$($_.Exception.Message)" -match '(?i)RecoverableItems.*(is not recognized|nie jest rozpoznawan)') { throw $script:RecoverableItemsRoleHint }
+        throw
+    }
+}
+
 function Get-HTRecoverableItems {
     param (
         [Parameter(Mandatory)][string]$Identity,
@@ -840,7 +852,8 @@ function Get-HTRecoverableItems {
         ErrorAction     = "Stop"
     }
     if ($SubjectContains) { $params.SubjectContains = $SubjectContains }
-    return @(Get-RecoverableItems @params | ForEach-Object {
+    $items = Invoke-HTRecoverableItemsCommand { Get-RecoverableItems @params }
+    return @($items | ForEach-Object {
             [PSCustomObject]@{
                 Temat     = $_.Subject
                 Typ       = $_.ItemClass
@@ -854,7 +867,7 @@ function Get-HTRecoverableItems {
 
 function Restore-HTRecoverableItem {
     param ([Parameter(Mandatory)][string]$Identity, [Parameter(Mandatory)][string]$EntryID)
-    Restore-RecoverableItems -Identity $Identity -EntryID $EntryID -ErrorAction Stop | Out-Null
+    Invoke-HTRecoverableItemsCommand { Restore-RecoverableItems -Identity $Identity -EntryID $EntryID -ErrorAction Stop | Out-Null }
 }
 #endregion
 
@@ -1075,10 +1088,16 @@ $script:BookingFields = [ordered]@{
 }
 
 function Get-HTRoomBookingSettings {
-    param ([Parameter(Mandatory)][string]$Identity)
+    # -RecipientTypeDetails: typ skrzynki, gdy znany (Get-Place obsługuje tylko sale i sprzęt - dla innych go nie wywołujemy)
+    param ([Parameter(Mandatory)][string]$Identity, [string]$RecipientTypeDetails = '')
     $cp = Get-CalendarProcessing -Identity $Identity -ErrorAction Stop
+    if (-not $RecipientTypeDetails) {
+        try { $RecipientTypeDetails = [string](Get-EXORecipient -Identity $Identity -ErrorAction Stop).RecipientTypeDetails } catch { Write-Verbose "Typ skrzynki $($Identity): $($_.Exception.Message)" }
+    }
     $place = $null
-    try { $place = Get-Place -Identity $Identity -ErrorAction Stop } catch { $place = $null }
+    if ($RecipientTypeDetails -in 'RoomMailbox', 'EquipmentMailbox', 'Workspace') {
+        try { $place = Get-Place -Identity $Identity -ErrorAction Stop } catch { $place = $null }
+    }
     $o = [ordered]@{ Sala = $Identity }
     if ($place) { $o['Pojemność'] = $place.Capacity; $o['Budynek'] = $place.Building; $o['Piętro'] = $place.Floor }
     foreach ($k in $script:BookingFields.Keys) {
