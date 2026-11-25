@@ -3663,6 +3663,7 @@ $script:ModuleViewXaml = @'
     <StackPanel Grid.Column="7" Orientation="Horizontal">
       <Button x:Name="btnEmptyCols" Style="{StaticResource GhostButton}" ToolTip="Ukryj kolumny bez wartości (kliknij ponownie, aby je pokazać)" Margin="0,0,4,0"/>
       <Button x:Name="btnColumns" Style="{StaticResource GhostButton}" ToolTip="Wybierz kolumny do pokazania - ukryte nie trafiają do kopiowania ani eksportu" Margin="0,0,4,0"/>
+      <Button x:Name="btnExtraCols" Style="{StaticResource GhostButton}" ToolTip="Dodaj kolumny z danymi obiektu (np. stanowisko, data utworzenia konta, typ skrzynki) - zapamiętane w tym module" Margin="0,0,4,0"/>
     </StackPanel>
     <Button x:Name="btnDetail" Grid.Column="8" Style="{StaticResource GhostButton}" ToolTip="Panel szczegółów wiersza" Margin="0,0,4,0"/>
     <Button x:Name="btnCopy" Grid.Column="9" Style="{StaticResource GhostButton}" ToolTip="Kopiuj zaznaczone wiersze lub całą tabelę (format Excel)" Margin="0,0,4,0"/>
@@ -3762,7 +3763,7 @@ function New-HTModuleView {
     $root = New-HTUiElement $script:ModuleViewXaml
     $Module.Root = $root
     foreach ($n in 'paramsCard', 'paramsStack', 'statsGrid', 'busyChip', 'busyText', 'btnBusyStop', 'countText', 'btnFilters', 'resultHint', 'filterBox', 'chkReveal',
-        'btnViews', 'btnColumns', 'btnEmptyCols', 'btnDetail', 'btnCopy', 'btnMail', 'btnExport', 'grid', 'emptyState', 'emptyIcon', 'emptyText', 'emptyHint', 'detailCol', 'detailSplit',
+        'btnViews', 'btnColumns', 'btnEmptyCols', 'btnExtraCols', 'btnDetail', 'btnCopy', 'btnMail', 'btnExport', 'grid', 'emptyState', 'emptyIcon', 'emptyText', 'emptyHint', 'detailCol', 'detailSplit',
         'detailPane', 'detailText', 'btnDetailCopy', 'btnCollapse') {
         $Module.View_[$n] = $root.FindName($n)
     }
@@ -3785,6 +3786,7 @@ function New-HTModuleView {
     $v.btnDetail.Content = New-HTIconContent -Text '' -Icon 'E8A1'
     $v.btnColumns.Content = New-HTIconContent -Text '' -Icon 'E8FD'
     $v.btnEmptyCols.Content = New-HTIconContent -Text '' -Icon 'ED1A'
+    $v.btnExtraCols.Content = New-HTIconContent -Text '' -Icon 'E710'
     $v.btnViews.Content = New-HTIconContent -Text '' -Icon 'E71D'
     $v.btnCopy.Content = New-HTIconContent -Text '' -Icon 'E8C8'
     $v.btnMail.Content = New-HTIconContent -Text '' -Icon 'E715'
@@ -3803,10 +3805,12 @@ function New-HTModuleView {
     Register-HTControlHandler -Control $v.btnExport -EventName 'Click' -Module $Module -Action { param($m) Export-HTResultView -Module $m }
     Register-HTControlHandler -Control $v.btnColumns -EventName 'Click' -Module $Module -Action { param($m) Select-HTResultColumns -Module $m }
     Register-HTControlHandler -Control $v.btnEmptyCols -EventName 'Click' -Module $Module -Action { param($m) Switch-HTEmptyColumns -Module $m }
+    Register-HTControlHandler -Control $v.btnExtraCols -EventName 'Click' -Module $Module -Action { param($m) Select-HTExtraColumns -Module $m }
     Register-HTControlHandler -Control $v.btnViews -EventName 'Click' -Module $Module -Action { param($m, $s) Show-HTViewsMenu -Module $m -Anchor $s }
     Register-HTControlHandler -Control $v.btnMail -EventName 'Click' -Module $Module -Action { param($m) Send-HTResultMail -Module $m }
     # Zapisane widoki i ukryte kolumny dotyczą modułów nawigacji (nie okien podglądu)
-    if (-not $Module.Workspace) { $v.btnViews.Visibility = 'Collapsed' }
+    if (-not $Module.Workspace) { $v.btnViews.Visibility = 'Collapsed'; $v.btnExtraCols.Visibility = 'Collapsed' }
+    else { Update-HTExtraColumnsButton -Module $Module }
     Register-HTControlHandler -Control $v.btnFilters -EventName 'Click' -Module $Module -Action { param($m) Clear-HTColumnFilters -Module $m; Show-HTToast 'Wyczyszczono filtry kolumn.' 'info' 2 }
     Register-HTControlHandler -Control $v.btnDetail -EventName 'Click' -Module $Module -Action {
         param($m)
@@ -5315,6 +5319,15 @@ function Update-HTHeaderMenu {
     [void]$Menu.Items.Add((New-HTMenuItem -Text 'Pokaż tylko tę kolumnę' -Icon 'E8FD' -Module $Module -Action { param($m) Set-HTResultColumns -Module $m -Visible @([string]$m.MenuCell.Column) }))
     [void]$Menu.Items.Add((New-HTMenuItem -Text 'Wybierz kolumny…' -Icon 'E8FD' -Module $Module -Action { param($m) Select-HTResultColumns -Module $m }))
     [void]$Menu.Items.Add((New-HTMenuItem -Text 'Ukryj / pokaż kolumny bez wartości' -Icon 'ED1A' -Module $Module -Action { param($m) Switch-HTEmptyColumns -Module $m }))
+    if ($Module.Workspace -and $Module.Key) {
+        [void]$Menu.Items.Add((New-HTMenuSeparator))
+        [void]$Menu.Items.Add((New-HTMenuItem -Text 'Dodaj kolumny z danymi…' -Icon 'E710' -Module $Module -Action { param($m) Select-HTExtraColumns -Module $m }))
+        $extra = @(Get-HTModuleExtraColumns $Module.Key).Count
+        if ($extra) {
+            [void]$Menu.Items.Add((New-HTMenuItem -Text 'Odśwież dodatkowe kolumny' -Icon 'E72C' -Module $Module -Action { param($m) Update-HTExtraColumns -Module $m -Refresh }))
+            [void]$Menu.Items.Add((New-HTMenuItem -Text "Usuń dodatkowe kolumny ($extra)" -Icon 'E74D' -Module $Module -Action { param($m) Set-HTModuleExtraColumns -Key $m.Key -Columns @(); Update-HTExtraColumns -Module $m; Show-HTToast 'Usunięto dodatkowe kolumny z tego modułu.' 'info' 3 }))
+        }
+    }
 }
 
 <#
@@ -5455,6 +5468,155 @@ function Select-HTResultColumns {
     Set-HTResultColumns -Module $Module -Visible $chosen
 }
 
+#region Dodatkowe kolumny z danymi (ExtraColumns.psm1)
+<#
+    Kolumny z danymi obiektu dopisywane do wyników dowolnego modułu (np. stanowisko i data utworzenia konta w raporcie,
+    typ skrzynki przy uprawnieniach): wybór zapamiętany w module, dopisywany po każdym odświeżeniu wyników. Wiersz
+    dopasowany po identyfikatorach (Id, UPN, adres, login - z kolumn, obiektu wiersza i obiektu docelowego), dane
+    pobierane jednym zapytaniem na źródło. Kolumny mają filtry, sortowanie, kopiowanie i eksport jak pozostałe.
+#>
+function Get-HTExtraColumnServices {
+    return @(@('Graph', 'Exchange', 'AD', 'SharePoint') | Where-Object { Test-HTConnection -Service $_ })
+}
+
+function Update-HTExtraColumnsButton {
+    param([hashtable]$Module)
+    $b = if ($Module.View_) { $Module.View_['btnExtraCols'] } else { $null }
+    if (-not $b -or -not $Module.Key) { return }
+    $n = @(Get-HTModuleExtraColumns $Module.Key).Count
+    $b.Content = New-HTIconContent -Text $(if ($n) { "+$n" } else { '' }) -Icon 'E710'
+    Set-HTToggleButtonState -Button $b -Active ($n -gt 0) -ToolTip $(if ($n) { "Dodatkowe kolumny z danymi: $n - dopisywane po każdym odświeżeniu wyników. Kliknij, aby zmienić; usunięcie - menu nagłówka kolumny." } else { 'Dodaj kolumny z danymi obiektu (np. stanowisko, data utworzenia konta, typ skrzynki) - zapamiętane w tym module' })
+}
+
+function Select-HTExtraColumns {
+    # Okno wyboru dodatkowych kolumn: «Źródło › Kolumna» z usług połączonych teraz (zapisane wcześniej - też widoczne)
+    param([Parameter(Mandatory)][hashtable]$Module)
+    if (-not $Module.Key) { return }
+    $current = @(Get-HTModuleExtraColumns $Module.Key)
+    $choices = Get-HTExtraColumnChoices -Services @(Get-HTExtraColumnServices) -PreferService $Module.Service
+    foreach ($spec in $current) {
+        if (@($choices.Values) -contains $spec) { continue }
+        $c = ConvertFrom-HTExtraColumnSpec $spec
+        if ($c) { $choices["$($c.SourceTitle) › $($c.Label) (brak połączenia)"] = $spec }
+    }
+    if (-not $choices.Count) { Show-HTWarning 'Dodatkowe kolumny pobierają dane z Microsoft 365, Exchange Online albo Active Directory - najpierw połącz się z usługą.' -Title 'Dodatkowe kolumny'; return }
+    $labels = @($choices.Keys)
+    $checked = @($labels | Where-Object { $current -contains $choices[$_] })
+    $offline = @((Get-HTExtraColumnSources).Values | Where-Object { $_.Service -and -not (Test-HTConnection -Service $_.Service) } | ForEach-Object { $_.Title })
+    $prompt = 'Kolumny z danymi obiektu dopisywane do wyników tego modułu (także po każdym odświeżeniu). Wiersze są dopasowywane po Id, UPN, adresie e-mail albo loginie - zaznacz dane obiektów, które pokazuje moduł.'
+    if ($offline.Count) { $prompt += " Bez połączenia (niedostępne): $($offline -join ', ')." }
+    $chosen = Show-HTCheckListDialog -Title "Dodatkowe kolumny - $($Module.Title)" -Prompt $prompt -Items $labels -Checked $checked -OkText 'Pokaż kolumny' -Icon 'E710'
+    if ($null -eq $chosen) { return }
+    Set-HTModuleExtraColumns -Key $Module.Key -Columns @($chosen | ForEach-Object { $choices[$_] })
+    if (-not $Module.Table -or $Module.Table.Rows.Count -eq 0) {
+        Update-HTExtraColumnsButton -Module $Module
+        Show-HTToast 'Zapisano dodatkowe kolumny - pojawią się po pobraniu wyników.' 'info' 4
+        return
+    }
+    Update-HTExtraColumns -Module $Module
+}
+
+function Remove-HTExtraColumnsFromTable {
+    # Usunięcie dopisanych kolumn (przed ponownym dopisaniem albo po wyłączeniu)
+    param([Parameter(Mandatory)][hashtable]$Module)
+    $t = $Module.Table
+    foreach ($name in @($Module['ExtraColumnNames'] | Where-Object { $_ })) {
+        if ($Module.Grid) { foreach ($c in @($Module.Grid.Columns | Where-Object { [string]$_.SortMemberPath -eq $name })) { [void]$Module.Grid.Columns.Remove($c) } }
+        if ($t -and $t.Columns.Contains($name)) {
+            # Sortowanie widoku po usuwanej kolumnie - najpierw bez sortowania
+            if ($Module.Grid -and @($Module.Grid.Items.SortDescriptions | Where-Object { $_.PropertyName -eq $name }).Count) { $Module.Grid.Items.SortDescriptions.Clear() }
+            if ($Module.View -and ([string]$Module.View.Sort).Contains($name)) { $Module.View.Sort = '' }
+            try { $t.Columns.Remove($name) } catch { Write-Log -Message "Dodatkowa kolumna «$name»: $($_.Exception.Message)" -Type 'Warn' }
+        }
+        if ($Module.ColumnIndex) { [void]$Module.ColumnIndex.Remove($name) }
+        if ($null -ne $Module.ColumnFilters -and $Module.ColumnFilters.Contains($name)) { $Module.ColumnFilters.Remove($name) }
+    }
+    $Module['ExtraColumnNames'] = @()
+}
+
+function Update-HTExtraColumns {
+    <#
+        Dopisanie dodatkowych kolumn modułu do bieżących wyników. -Refresh - dane od nowa (bez pamięci podręcznej),
+        -Quiet - powiadomienie tylko przy problemie (po automatycznym dopisaniu po zapytaniu).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Module, [switch]$Refresh, [switch]$Quiet)
+    Remove-HTExtraColumnsFromTable -Module $Module
+    Update-HTExtraColumnsButton -Module $Module
+    $specs = @(Get-HTModuleExtraColumns $Module.Key | ForEach-Object { ConvertFrom-HTExtraColumnSpec $_ } | Where-Object { $_ })
+    $t = $Module.Table
+    if (-not $specs.Count -or -not $t -or $t.Rows.Count -eq 0) { Update-HTResultFilter -Module $Module; return }
+    $existing = @($t.Columns | ForEach-Object { [string]$_.ColumnName })
+    $added = New-Object System.Collections.Generic.List[string]
+    $notes = New-Object System.Collections.Generic.List[string]
+    $problems = 0
+    Set-HTBusy -Busy $true -Text 'Dodatkowe kolumny…'
+    try {
+        foreach ($group in @($specs | Group-Object Source)) {
+            $src = Get-HTExtraColumnSource -Key $group.Name
+            if ($src.Service -and -not (Test-HTConnection -Service $src.Service)) { $notes.Add("$($src.Title): brak połączenia"); $problems++; continue }
+            $attrs = @($group.Group | ForEach-Object { $_.Attribute })
+            $data = $null
+            try { $data = Get-HTExtraColumnData -Source $src.Key -Attributes $attrs -Refresh:$Refresh }
+            catch {
+                $notes.Add("$($src.Title): $($_.Exception.Message)")
+                $problems++
+                Write-Log -Message "Dodatkowe kolumny ($($Module.Title)) - $($src.Title): $($_.Exception.Message)" -Type 'Warn'
+                continue
+            }
+            $names = @{}
+            foreach ($sp in $group.Group) {
+                $name = Get-HTExtraColumnName -Label $sp.Label -SourceTitle $src.Title -Existing (@($existing) + @($added))
+                $names[$sp.Attribute] = $name
+                if (-not $t.Columns.Contains($name)) { [void]$t.Columns.Add($name, [object]) }
+                $added.Add($name)
+            }
+            $visibleColumns = @($t.Columns | Where-Object { -not $_.ColumnName.StartsWith('__') })
+            $matched = 0
+            $t.BeginLoadData()
+            try {
+                foreach ($row in $t.Rows) {
+                    if ($row.RowState -eq [System.Data.DataRowState]::Deleted) { continue }
+                    $values = @{}
+                    foreach ($c in $visibleColumns) { $values[$c.ColumnName] = $row[$c] }
+                    $keys = @(Get-HTExtraColumnRowKeys -Values $values -Object $row['__obj'] -KeyProperties $src.KeyProperties)
+                    $hit = Find-HTExtraColumnValues -Index $data.Index -Keys $keys
+                    if ($null -eq $hit) { continue }
+                    $matched++
+                    $search = New-Object System.Text.StringBuilder
+                    foreach ($a in $attrs) {
+                        $v = ConvertTo-HTCellValue $hit[$a]
+                        $row[$names[$a]] = $v
+                        if ($v -isnot [System.DBNull]) { [void]$search.Append(' ').Append(([string]$v).ToLowerInvariant()) }
+                    }
+                    if ($search.Length) { $row['__search'] = [string]$row['__search'] + $search.ToString() }
+                }
+            }
+            finally { $t.EndLoadData() }
+            if (-not $matched) { $problems++ }
+            $notes.Add("$($src.Title): dopasowano $matched z $($t.Rows.Count)")
+        }
+    }
+    finally { Set-HTBusy -Busy $false -Text "Dodatkowe kolumny - $($notes -join '; ')" }
+    $Module['ExtraColumnNames'] = $added.ToArray()
+    foreach ($n in $added) { Add-HTGridColumn -Module $Module -Name $n }
+    if ($null -ne $Module.ColumnFilters -and $Module.ColumnFilters.Count) { Update-HTColumnFilterFlags -Module $Module }
+    Update-HTResultFilter -Module $Module
+    if (-not $Quiet -or $problems) {
+        $hint = if ($problems) { ' Wiersze bez dopasowania: moduł pokazuje inne obiekty niż wybrane źródło albo nie ma ich identyfikatora (Id, UPN, adresu, loginu).' } else { '' }
+        Show-HTToast "Dodatkowe kolumny - $($notes -join '; ').$hint" $(if ($problems) { 'warn' } else { 'ok' }) 6
+    }
+}
+
+function Invoke-HTExtraColumnsAfterQuery {
+    # Po zapytaniu modułu: dopisanie zapamiętanych dodatkowych kolumn (błąd nie przerywa wyników)
+    param([hashtable]$Module)
+    if (-not $Module -or -not $Module.Key -or -not $Module.Workspace -or -not $Module.Table -or $Module.Table.Rows.Count -eq 0) { return }
+    if (-not @(Get-HTModuleExtraColumns $Module.Key).Count) { return }
+    try { Update-HTExtraColumns -Module $Module -Quiet }
+    catch { Write-Log -Message "Dodatkowe kolumny ($($Module.Title)): $($_.Exception.Message)" -Type 'Warn' }
+}
+#endregion
+
 function Get-HTColumnTextValues {
     # Wartości jednej kolumny jako tekst (bez tabulatorów i nowych linii): widoczne wiersze albo zaznaczone; -Unique bez pustych i powtórzeń
     param([Parameter(Mandatory)][hashtable]$Module, [Parameter(Mandatory)][string]$Column, [switch]$SelectedOnly, [switch]$Unique)
@@ -5570,6 +5732,7 @@ function Invoke-HTQuery {
         $count = $Module.Table.Rows.Count
         Write-Log -Message "$Name - wyników: $count" -Type 'Info'
         Set-HTBusy -Busy $false -Text "$Name - wyników: $count"
+        Invoke-HTExtraColumnsAfterQuery -Module $Module
         if ($recordKind -eq 'Check') { Add-HTCheckRecord -Module $Module -Name $Name -Object $scope -Details (Get-HTResultFlagSummary -Module $Module) }
         elseif ($recordKind -eq 'Change') { Add-HTQueryChangeRecords -Module $Module -Name $Name -From $rowsBefore }
     }
@@ -5715,6 +5878,7 @@ function Invoke-HTTargetQuery {
         $stopText = if ($state.StoppedAt -ge 0) { ", przerwano po $($state.StoppedAt) z $($Targets.Count) obiekt." } else { '' }
         Set-HTBusy -Busy $false -Text "$Name - wyników: $count$(if ($state.Failed) { ", błędy: $($state.Failed)" })$stopText"
     }
+    Invoke-HTExtraColumnsAfterQuery -Module $Module
     $stopText = if ($state.StoppedAt -ge 0) { " - przerwano po $($state.StoppedAt) z $($Targets.Count) obiekt." } else { '' }
     Write-Log -Message "$Name ($($Targets.Count) obiekt.) - wyników: $($Module.Table.Rows.Count)$(if ($state.Failed) { ", błędy: $($state.Failed)" })$stopText" -Type $(if ($state.Failed -or $state.StoppedAt -ge 0) { 'Warn' } else { 'Info' })
     # Podsumowanie «Do zgłoszenia»: co sprawdzono (obiekty) i z jakim wynikiem

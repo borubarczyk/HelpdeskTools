@@ -945,24 +945,127 @@ function Get-HTM365GuestUsers {
 }
 
 # Stan rejestracji metod uwierzytelniania (MFA, SSPR, passwordless)
+#region Rejestracja MFA i MFA na koncie (per-user MFA)
+<#
+    MFA na koncie (per-user MFA) - dla tenantów bez Entra ID P1 i dostępu warunkowego: «enabled» (konto objęte MFA,
+    rejestracja metody przy najbliższym logowaniu; po rejestracji Microsoft zmienia stan na «enforced»), «enforced»
+    (MFA wymagane przy każdym logowaniu), «disabled». Microsoft Graph beta: users/{id}/authentication/requirements,
+    odczyt - Policy.Read.All, zmiana - Policy.ReadWrite.AuthenticationMethod (rola Authentication Policy Administrator).
+#>
+$script:PerUserMfaStates = [ordered]@{ disabled = 'Wyłączone'; enabled = 'Włączone'; enforced = 'Wymuszone' }
+
+function Get-HTPerUserMfaStateLabel {
+    param([AllowEmptyString()][AllowNull()][string]$State)
+    if (-not $State) { return '' }
+    if ($script:PerUserMfaStates.Contains($State)) { return $script:PerUserMfaStates[$State] }
+    return $State
+}
+
+function Get-HTM365PerUserMfaStates {
+    # Stan MFA na koncie dla wielu kont naraz (zapytania zbiorcze po 20): Id konta -> disabled / enabled / enforced
+    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Ids)
+    $result = @{}
+    $ids = @($Ids | Where-Object { $_ } | Select-Object -Unique)
+    if (-not $ids.Count) { return $result }
+    $batch = Invoke-HTGraphBatch -Beta -Requests @($ids | ForEach-Object { @{ Id = $_; Url = "users/$_/authentication/requirements" } })
+    foreach ($id in $ids) {
+        $b = $batch[$id]
+        if ($b -and $b.Status -lt 300 -and $b.Body) { $result[$id] = [string]$b.Body.perUserMfaState }
+    }
+    return $result
+}
+
+function Set-HTM365PerUserMfaState {
+    # Zmiana MFA na koncie (per-user): disabled / enabled / enforced
+    param([Parameter(Mandatory)][string]$Id, [Parameter(Mandatory)][ValidateSet('disabled', 'enabled', 'enforced')][string]$State)
+    Invoke-HTGraphRequest -Uri "users/$Id/authentication/requirements" -Method PATCH -Body @{ perUserMfaState = $State } -Beta | Out-Null
+}
+
+function Get-HTSecurityDefaultsState {
+    # Czy w tenancie włączone są ustawienia domyślne zabezpieczeń (Security Defaults); $null - nie udało się sprawdzić
+    try { return [bool](Invoke-HTGraphRequest -Uri 'policies/identitySecurityDefaultsEnforcementPolicy').isEnabled }
+    catch { Write-Verbose "Security Defaults: $($_.Exception.Message)"; return $null }
+}
+
+function Get-HTM365AuthMethodSummary {
+    # Metody uwierzytelniania konta (lista z authentication/methods) - nazwy i czy jest metoda MFA (inna niż hasło)
+    param([AllowEmptyCollection()][object[]]$Methods = @())
+    $names = @(foreach ($mt in @($Methods | Where-Object { $_ })) {
+            $type = [string]$mt.'@odata.type'
+            $info = $script:AuthMethodMap[$type]
+            if ($info) { $info.Name } else { $type -replace '#microsoft.graph.', '' -replace 'AuthenticationMethod$', '' }
+        })
+    $mfa = @($Methods | Where-Object { $_ -and [string]$_.'@odata.type' -notin '#microsoft.graph.passwordAuthenticationMethod', '#microsoft.graph.emailAuthenticationMethod' })
+    return [PSCustomObject]@{ Names = @($names | Select-Object -Unique); HasMfa = ($mfa.Count -gt 0) }
+}
+
 function Get-HTM365MfaRegistration {
-    $items = Invoke-HTGraphRequest -Uri "reports/authenticationMethods/userRegistrationDetails?`$top=999" -All
-    foreach ($r in $items) {
-        [PSCustomObject]@{
-            Nazwa               = $r.userDisplayName
-            UPN                 = $r.userPrincipalName
-            Administrator       = [bool]$r.isAdmin
-            "MFA zarejestrowane" = [bool]$r.isMfaRegistered
-            "MFA możliwe"       = [bool]$r.isMfaCapable
-            SSPR                = [bool]$r.isSsprRegistered
-            "Bez hasła"         = [bool]$r.isPasswordlessCapable
-            "Domyślna metoda"   = $r.userPreferredMethodForSecondaryAuthentication
-            Metody              = (@($r.methodsRegistered) -join ", ")
-            Typ                 = $r.userType
-            __flag              = if (-not $r.isMfaRegistered -and $r.isAdmin) { "crit" } elseif (-not $r.isMfaRegistered) { "warn" } else { "" }
+    <#
+        Rejestracja MFA kont: z raportu Entra ID (userRegistrationDetails - wymaga Entra ID P1), a bez P1 - z metod
+        uwierzytelniania każdego konta (zapytania zbiorcze, wolniej). Kolumny: konto, logowanie, data utworzenia,
+        administrator, MFA zarejestrowane, metody i - z -PerUserState - stan MFA na koncie (per-user).
+    #>
+    param([switch]$PerUserState)
+    $users = @{}
+    foreach ($u in @(Invoke-HTGraphRequest -Uri "users?`$select=id,displayName,userPrincipalName,userType,accountEnabled,createdDateTime&`$top=999" -All)) { $users[[string]$u.id] = $u }
+    $details = $null
+    try { $details = @(Invoke-HTGraphRequest -Uri "reports/authenticationMethods/userRegistrationDetails?`$top=999" -All) }
+    catch { Write-Log -Message "Rejestracja MFA: raport Entra ID niedostępny (zwykle brak Entra ID P1) - odczyt metod każdego konta. $($_.Exception.Message)" -Type 'Info' }
+    $rows = New-Object System.Collections.Generic.List[object]
+    if ($null -ne $details) {
+        foreach ($r in $details) {
+            $u = $users[[string]$r.id]
+            $rows.Add([ordered]@{
+                    Nazwa                = $r.userDisplayName
+                    UPN                  = $r.userPrincipalName
+                    Logowanie            = $(if ($u) { if ($u.accountEnabled) { 'Dozwolone' } else { 'Zablokowane' } } else { '' })
+                    Utworzono            = $(if ($u -and $u.createdDateTime) { [datetime]$u.createdDateTime } else { $null })
+                    Administrator        = [bool]$r.isAdmin
+                    'MFA zarejestrowane' = [bool]$r.isMfaRegistered
+                    'MFA możliwe'        = [bool]$r.isMfaCapable
+                    SSPR                 = [bool]$r.isSsprRegistered
+                    'Bez hasła'          = [bool]$r.isPasswordlessCapable
+                    'Domyślna metoda'    = $r.userPreferredMethodForSecondaryAuthentication
+                    Metody               = (@($r.methodsRegistered) -join ', ')
+                    Typ                  = $r.userType
+                    Id                   = [string]$r.id
+                })
         }
     }
+    else {
+        $admins = @{}
+        try { foreach ($a in @(Get-HTM365AdminRoles)) { if ($a.Id) { $admins[[string]$a.Id] = $true } } } catch { Write-Verbose "Role administracyjne: $($_.Exception.Message)" }
+        $members = @($users.Values | Where-Object { [string]$_.userType -ne 'Guest' } | Sort-Object displayName)
+        $batch = Invoke-HTGraphBatch -Requests @($members | ForEach-Object { @{ Id = [string]$_.id; Url = "users/$($_.id)/authentication/methods" } })
+        foreach ($u in $members) {
+            $b = $batch[[string]$u.id]
+            $summary = if ($b -and $b.Status -lt 300) { Get-HTM365AuthMethodSummary -Methods @($b.Body.value) } else { $null }
+            $rows.Add([ordered]@{
+                    Nazwa                = $u.displayName
+                    UPN                  = $u.userPrincipalName
+                    Logowanie            = $(if ($u.accountEnabled) { 'Dozwolone' } else { 'Zablokowane' })
+                    Utworzono            = $(if ($u.createdDateTime) { [datetime]$u.createdDateTime } else { $null })
+                    Administrator        = [bool]$admins[[string]$u.id]
+                    'MFA zarejestrowane' = $(if ($summary) { $summary.HasMfa } else { $null })
+                    Metody               = $(if ($summary) { $summary.Names -join ', ' } else { "nie odczytano (HTTP $(if ($b) { $b.Status }))" })
+                    Typ                  = $u.userType
+                    Id                   = [string]$u.id
+                })
+        }
+    }
+    $states = if ($PerUserState) { Get-HTM365PerUserMfaStates -Ids @($rows | ForEach-Object { $_.Id }) } else { @{} }
+    foreach ($r in $rows) {
+        $o = [ordered]@{}
+        foreach ($k in $r.Keys) {
+            $o[$k] = $r[$k]
+            # «MFA na koncie» zaraz za «MFA zarejestrowane»
+            if ($k -eq 'MFA zarejestrowane' -and $PerUserState) { $o['MFA na koncie'] = Get-HTPerUserMfaStateLabel $states[[string]$r.Id] }
+        }
+        $o['__flag'] = if ($r['MFA zarejestrowane'] -eq $false -and $r.Administrator) { 'crit' } elseif ($r['MFA zarejestrowane'] -eq $false) { 'warn' } else { '' }
+        [PSCustomObject]$o
+    }
 }
+#endregion
 
 # Aktywni użytkownicy (członkowie) bez licencji
 function Get-HTM365UnlicensedUsers {

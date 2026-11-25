@@ -596,6 +596,7 @@ $script:UndoKinds = @{
     DefenderIsolation = @{ Title = 'Zwolnienie urządzenia z izolacji'; Service = 'Defender' }
     GroupMember       = @{ Title = 'Przywrócenie członkostwa w grupie'; Service = 'Graph' }
     Manager           = @{ Title = 'Przywrócenie przełożonego'; Service = 'Graph' }
+    PerUserMfa        = @{ Title = 'Przywrócenie MFA na koncie (per-user)'; Service = 'Graph' }
 }
 
 function Get-HTUndoKinds { return $script:UndoKinds }
@@ -637,6 +638,7 @@ function Invoke-HTUndo {
             if ($d.Added) { Remove-HTM365GroupMember -GroupId $d.GroupId -MemberId $d.UserId; 'Usunięto z grupy (cofnięcie dodania)' }
             else { Add-HTM365GroupMember -GroupId $d.GroupId -MemberId $d.UserId; 'Dodano ponownie do grupy' }
         }
+        'PerUserMfa' { Set-HTM365PerUserMfaState -Id $d.UserId -State ([string]$d.State); "Przywrócono MFA na koncie: $(Get-HTPerUserMfaStateLabel ([string]$d.State))" }
         'Manager' {
             if ($d.ManagerId) { Set-HTM365UserManager -Id $d.UserId -ManagerId $d.ManagerId; 'Przywrócono poprzedniego przełożonego' }
             else { Remove-HTM365UserManager -Id $d.UserId; 'Usunięto przełożonego (wcześniej brak)' }

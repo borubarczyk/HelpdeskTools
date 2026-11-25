@@ -1027,7 +1027,8 @@ Register-HTObjectAction -Kind 'M365User' -Text 'Unieważnij sesje' -Icon 'E7E8' 
 
 #region Raporty
 function Register-HTM365Report {
-    param([string]$Key, [string]$Title, [string]$Icon, [string]$Description, [scriptblock]$Query, [switch]$Days, [int]$DefaultDays = 0, [string]$DaysLabel = 'Dni:', [scriptblock]$Extra)
+    # -Prepare { param($m) }: przed raportem w wątku okna (np. pytanie o uprawnienia); $false - raport nie startuje
+    param([string]$Key, [string]$Title, [string]$Icon, [string]$Description, [scriptblock]$Query, [switch]$Days, [int]$DefaultDays = 0, [string]$DaysLabel = 'Dni:', [scriptblock]$Extra, [scriptblock]$Prepare)
     Register-HTModule -Workspace 'M365' -Category 'Raporty' -Key $Key -Title $Title -Icon $Icon -Service 'Graph' -Description $Description -Build {
         param($m)
         $def = $script:M365ReportDefs[$m.Key]
@@ -1041,6 +1042,7 @@ function Register-HTM365Report {
         Add-HTButton -Parent $row -Module $m -Text 'Generuj raport' -Icon 'E9D2' -Primary -OnClick {
             param($m)
             $days = if ($m.C.Days) { Get-HTNum $m.C.Days } else { 0 }
+            if ($m.Data.Prepare -and (& $m.Data.Prepare $m) -eq $false) { return }
             $query = $m.Data.Query
             Invoke-HTQuery -Module $m -Name $m.Title -ScriptBlock { & $query $m $days }
         } | Out-Null
@@ -1055,7 +1057,7 @@ function Register-HTM365Report {
         }
     }
     # Parametry raportu trafiają do kontekstu modułu przy pierwszym otwarciu
-    $script:M365ReportDefs[$Key] = @{ Query = $Query; Days = [bool]$Days; DefaultDays = $DefaultDays; DaysLabel = $DaysLabel; Extra = $Extra }
+    $script:M365ReportDefs[$Key] = @{ Query = $Query; Days = [bool]$Days; DefaultDays = $DefaultDays; DaysLabel = $DaysLabel; Extra = $Extra; Prepare = $Prepare }
 }
 $script:M365ReportDefs = @{}
 
@@ -1064,7 +1066,52 @@ Register-HTM365Report -Key 'm365.rep.inactive' -Title 'Nieaktywni użytkownicy' 
     -Extra { param($m, $row) $m.C.Disabled = Add-HTCheckBox -Parent $row -Text 'Także zablokowane'; $m.C.Guests = Add-HTCheckBox -Parent $row -Text 'Także goście' } `
     -Query { param($m, $days) Get-HTM365InactiveUsers -Days $days -IncludeDisabled:(Test-HTChecked $m.C.Disabled) -IncludeGuests:(Test-HTChecked $m.C.Guests) }
 Register-HTM365Report -Key 'm365.rep.guests' -Title 'Goście' -Icon 'E8D4' -Description 'Konta gości: stan zaproszenia i ostatnie logowanie. Wyróżnione - nieaktywne ponad 90 dni.' -Query { param($m, $days) Get-HTM365GuestUsers }
-Register-HTM365Report -Key 'm365.rep.mfa' -Title 'Rejestracja MFA' -Icon 'E928' -Description 'Kto nie ma zarejestrowanego MFA (czerwone - administratorzy bez MFA). Wymaga Entra ID P1.' -Query { param($m, $days) Get-HTM365MfaRegistration }
+function Invoke-HTPerUserMfaAction {
+    <#
+        MFA na koncie (per-user MFA) dla zaznaczonych wierszy raportu - tenanty bez Entra ID P1 i dostępu warunkowego.
+        enabled - konto objęte MFA, rejestracja metody przy najbliższym logowaniu (potem Microsoft zmienia stan na
+        «wymuszone»); enforced - MFA wymagane przy każdym logowaniu; disabled - wyłączenie. Wpis do «Cofanie zmian».
+    #>
+    param([Parameter(Mandatory)][hashtable]$Module, [AllowEmptyCollection()][object[]]$Rows, [Parameter(Mandatory)][ValidateSet('enabled', 'enforced', 'disabled')][string]$State)
+    $targets = @($Rows | Where-Object { $_ -and $_.Id })
+    if (-not $targets.Count) { Show-HTWarning 'Zaznacz konta w wynikach raportu.'; return }
+    if (-not (Assert-HTGraphScopes -Scopes @('Policy.ReadWrite.AuthenticationMethod') -Feature 'MFA na koncie (per-user)')) { return }
+    $label = Get-HTPerUserMfaStateLabel $State
+    $summary = New-Object System.Collections.Generic.List[string]
+    $summary.Add("MFA na koncie (per-user): $($label.ToLowerInvariant())")
+    switch ($State) {
+        'enabled' { $summary.Add('Konto musi zarejestrować metodę MFA przy najbliższym logowaniu; po rejestracji stan zmieni się na «wymuszone».') }
+        'enforced' { $summary.Add('MFA będzie wymagane przy każdym logowaniu. Konto bez zarejestrowanej metody zarejestruje ją przy logowaniu; stare aplikacje bez nowoczesnego uwierzytelniania potrzebują haseł aplikacji.') }
+        'disabled' { $summary.Add('Konto przestanie wymagać MFA przy logowaniu (zarejestrowane metody zostają).') }
+    }
+    if ((Get-HTSecurityDefaultsState) -eq $true) { $summary.Add('Uwaga: w tenancie są włączone ustawienia domyślne zabezpieczeń (Security Defaults) - one same wymagają MFA, a Microsoft nie zaleca łączenia ich z MFA na koncie.') }
+    $before = @{}
+    try { $before = Get-HTM365PerUserMfaStates -Ids @($targets | ForEach-Object { [string]$_.Id }) } catch { Write-Log -Message "MFA na koncie - odczyt stanu przed zmianą: $($_.Exception.Message)" -Type 'Warn' }
+    Invoke-HTRowAction -Module $Module -Name "MFA na koncie: $($label.ToLowerInvariant())" -Rows $targets -Danger -Summary $summary.ToArray() -Label { param($r) [string]$r.UPN } -Action {
+        param($r)
+        $previous = [string]$before[[string]$r.Id]
+        Set-HTM365PerUserMfaState -Id $r.Id -State $State
+        if ($previous -and $previous -ne $State) { Register-HTUndo -Operation "MFA na koncie: $label" -Object ([string]$r.UPN) -Kind 'PerUserMfa' -Data @{ UserId = [string]$r.Id; State = $previous } }
+        "MFA na koncie: $(if ($previous) { "$(Get-HTPerUserMfaStateLabel $previous) -> " })$label"
+    } -Refresh { param($m) Invoke-HTModulePrimary $m }
+}
+
+Register-HTM365Report -Key 'm365.rep.mfa' -Title 'Rejestracja MFA' -Icon 'E928' `
+    -Description 'Kto nie ma zarejestrowanego MFA (czerwone - administratorzy bez MFA), data utworzenia konta i stan MFA na koncie (per-user). Bez Entra ID P1 - z metod uwierzytelniania kont. Prawy przycisk: włączenie (Enable) i wymuszenie (Enforce) MFA na zaznaczonych kontach - gdy tenant nie ma dostępu warunkowego.' `
+    -Extra {
+    param($m, $row)
+    $m.C.PerUser = Add-HTCheckBox -Parent $row -Text 'Stan MFA na koncie (per-user)' -Checked $true -ToolTip 'Kolumna «MFA na koncie»: wyłączone / włączone / wymuszone (wymaga uprawnienia Microsoft Graph Policy.Read.All)'
+    Add-HTRowAction -Module $m -Text 'MFA na koncie: włącz (Enable)' -Icon 'E8D7' -Danger -Action { param($m, $rows) Invoke-HTPerUserMfaAction -Module $m -Rows $rows -State 'enabled' }
+    Add-HTRowAction -Module $m -Text 'MFA na koncie: wymuś (Enforce)' -Icon 'E72E' -Danger -Action { param($m, $rows) Invoke-HTPerUserMfaAction -Module $m -Rows $rows -State 'enforced' }
+    Add-HTRowAction -Module $m -Text 'MFA na koncie: wyłącz' -Icon 'E711' -Danger -Action { param($m, $rows) Invoke-HTPerUserMfaAction -Module $m -Rows $rows -State 'disabled' }
+} -Prepare {
+    param($m)
+    $m.Data.PerUser = Test-HTChecked $m.C.PerUser
+    if ($m.Data.PerUser -and -not (Test-HTGraphScopes -Scopes @('Policy.Read.All')) -and -not (Test-HTGraphScopes -Scopes @('Policy.ReadWrite.AuthenticationMethod'))) {
+        if (-not (Assert-HTGraphScopes -Scopes @('Policy.Read.All') -Feature 'Stan MFA na koncie (per-user)')) { $m.Data.PerUser = $false }
+    }
+    return $true
+} -Query { param($m, $days) Get-HTM365MfaRegistration -PerUserState:([bool]$m.Data.PerUser) }
 Register-HTM365Report -Key 'm365.rep.unlicensed' -Title 'Bez licencji' -Icon 'E8EC' -Description 'Konta członków organizacji bez żadnej licencji.' -Query { param($m, $days) Get-HTM365UnlicensedUsers }
 Register-HTM365Report -Key 'm365.rep.admins' -Title 'Role administracyjne' -Icon 'E7EF' -Description 'Członkowie aktywnych ról katalogu (Global Administrator wyróżniony).' -Query { param($m, $days) Get-HTM365AdminRoles }
 Register-HTM365Report -Key 'm365.rep.failed' -Title 'Nieudane logowania' -Icon 'E7BA' -Days -DefaultDays 24 -DaysLabel 'Ostatnie godziny:' `

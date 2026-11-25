@@ -563,3 +563,51 @@ Describe "Odwołanie do listy SharePoint (tytuły przetłumaczone)" {
         Get-HTSPListId -Node ([PSCustomObject]@{ ListTitle = 'X'; ListId = 'nie-guid' }) | Should -Be ''
     }
 }
+
+Describe "Rejestracja MFA i MFA na koncie (per-user)" {
+    It "raport Entra ID (P1): data utworzenia, logowanie, Id i stan MFA na koncie" {
+        Mock -ModuleName ModulesConnection Invoke-MgGraphRequest {
+            if ($Uri -like '*userRegistrationDetails*') { return [PSCustomObject]@{ value = @([PSCustomObject]@{ id = 'u1'; userDisplayName = 'Jan'; userPrincipalName = 'jan@contoso.pl'; isAdmin = $true; isMfaRegistered = $false; methodsRegistered = @() }) } }
+            if ($Uri -like '*$batch*') { return [PSCustomObject]@{ responses = @([PSCustomObject]@{ id = 'u1'; status = 200; body = [PSCustomObject]@{ perUserMfaState = 'enforced' } }) } }
+            [PSCustomObject]@{ value = @([PSCustomObject]@{ id = 'u1'; displayName = 'Jan'; userPrincipalName = 'jan@contoso.pl'; userType = 'Member'; accountEnabled = $true; createdDateTime = '2024-03-01T10:00:00Z' }) }
+        }
+        $r = @(Get-HTM365MfaRegistration -PerUserState)[0]
+        $r.Id | Should -Be 'u1'
+        $r.Utworzono | Should -BeOfType [datetime]
+        $r.Logowanie | Should -Be 'Dozwolone'
+        $r.'MFA na koncie' | Should -Be 'Wymuszone'
+        $r.__flag | Should -Be 'crit'
+        Should -Invoke -ModuleName ModulesConnection Invoke-MgGraphRequest -ParameterFilter { $Uri -like 'https://graph.microsoft.com/beta/$batch' -and $Body -like '*authentication/requirements*' }
+    }
+    It "bez Entra ID P1: metody uwierzytelniania kont (telefon - MFA, samo hasło - brak)" {
+        Mock -ModuleName ModulesConnection Invoke-MgGraphRequest {
+            if ($Uri -like '*userRegistrationDetails*') { throw 'Tenant does not have a SKU required for this feature' }
+            if ($Uri -like '*directoryRoles*') { return [PSCustomObject]@{ value = @() } }
+            if ($Uri -like '*$batch*') {
+                return [PSCustomObject]@{ responses = @(
+                        [PSCustomObject]@{ id = 'u1'; status = 200; body = [PSCustomObject]@{ value = @([PSCustomObject]@{ '@odata.type' = '#microsoft.graph.passwordAuthenticationMethod' }, [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.phoneAuthenticationMethod' }) } }
+                        [PSCustomObject]@{ id = 'u2'; status = 200; body = [PSCustomObject]@{ value = @([PSCustomObject]@{ '@odata.type' = '#microsoft.graph.passwordAuthenticationMethod' }) } }
+                    ) }
+            }
+            [PSCustomObject]@{ value = @(
+                    [PSCustomObject]@{ id = 'u1'; displayName = 'Anna'; userPrincipalName = 'anna@contoso.pl'; userType = 'Member'; accountEnabled = $true; createdDateTime = '2024-01-01T00:00:00Z' }
+                    [PSCustomObject]@{ id = 'u2'; displayName = 'Bartek'; userPrincipalName = 'bartek@contoso.pl'; userType = 'Member'; accountEnabled = $false; createdDateTime = '2025-01-01T00:00:00Z' }
+                    [PSCustomObject]@{ id = 'g1'; displayName = 'Gość'; userPrincipalName = 'g#EXT#@contoso.pl'; userType = 'Guest'; accountEnabled = $true; createdDateTime = '2025-01-01T00:00:00Z' }
+                ) }
+        }
+        $rows = @(Get-HTM365MfaRegistration)
+        $rows.Count | Should -Be 2
+        ($rows | Where-Object UPN -eq 'anna@contoso.pl').'MFA zarejestrowane' | Should -BeTrue
+        ($rows | Where-Object UPN -eq 'anna@contoso.pl').Metody | Should -Match 'Telefon'
+        ($rows | Where-Object UPN -eq 'bartek@contoso.pl').'MFA zarejestrowane' | Should -BeFalse
+        ($rows | Where-Object UPN -eq 'bartek@contoso.pl').Logowanie | Should -Be 'Zablokowane'
+    }
+    It "zmiana MFA na koncie: PATCH beta authentication/requirements" {
+        Mock -ModuleName ModulesConnection Invoke-MgGraphRequest { }
+        Set-HTM365PerUserMfaState -Id 'u1' -State enabled
+        Should -Invoke -ModuleName ModulesConnection Invoke-MgGraphRequest -Times 1 -ParameterFilter { $Method -eq 'PATCH' -and $Uri -eq 'https://graph.microsoft.com/beta/users/u1/authentication/requirements' -and $Body -match '"perUserMfaState":"enabled"' }
+        { Set-HTM365PerUserMfaState -Id 'u1' -State 'on' } | Should -Throw
+        Get-HTPerUserMfaStateLabel 'enforced' | Should -Be 'Wymuszone'
+        Get-HTPerUserMfaStateLabel '' | Should -Be ''
+    }
+}

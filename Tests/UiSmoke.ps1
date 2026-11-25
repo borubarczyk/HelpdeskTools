@@ -190,6 +190,30 @@ try {
 }
 catch { $failures.Add("Pokrycie testami: $($_.Exception.Message)") }
 
+# Dodatkowe kolumny: źródło testowe, wyniki modułu - kolumna dopisana po dopasowaniu UPN, potem usunięta
+try {
+    Register-HTExtraColumnSource -Key 'zzSmoke' -Title 'Test interfejsu' -KeyProperties @('UPN') -Attributes ([ordered]@{ title = 'Stanowisko (test)' }) -Fetch { param($a) @{ Keys = @('jan@contoso.pl'); Values = @{ title = 'Księgowy' } } }
+    $xm = Get-HTModuleInstance -Key 'dash.log'
+    $savedExtra = @(Get-HTModuleExtraColumns 'dash.log')
+    Reset-HTResults -Module $xm
+    Add-HTResultRows -Module $xm -Objects @([PSCustomObject]@{ Nazwa = 'Jan'; UPN = 'jan@contoso.pl' }, [PSCustomObject]@{ Nazwa = 'Anna'; UPN = 'anna@contoso.pl' })
+    Set-HTModuleExtraColumns -Key 'dash.log' -Columns @('zzSmoke|title')
+    Update-HTExtraColumns -Module $xm -Quiet
+    $col = 'Stanowisko (test)'
+    if (-not $xm.Table.Columns.Contains($col)) { $failures.Add('Dodatkowe kolumny: kolumna nie została dodana do tabeli.') }
+    elseif ([string]$xm.Table.Rows[0][$col] -ne 'Księgowy' -or -not ($xm.Table.Rows[1][$col] -is [System.DBNull])) { $failures.Add("Dodatkowe kolumny: złe wartości («$($xm.Table.Rows[0][$col])», «$($xm.Table.Rows[1][$col])»).") }
+    elseif (-not @($xm.Grid.Columns | Where-Object { [string]$_.SortMemberPath -eq $col }).Count) { $failures.Add('Dodatkowe kolumny: brak kolumny w tabeli na ekranie.') }
+    elseif ([string]$xm.Table.Rows[0]['__search'] -notmatch 'księgowy') { $failures.Add('Dodatkowe kolumny: wartość nie trafia do filtrowania wyników.') }
+    Set-HTModuleExtraColumns -Key 'dash.log' -Columns $savedExtra
+    Update-HTExtraColumns -Module $xm -Quiet
+    if ($xm.Table.Columns.Contains($col)) { $failures.Add('Dodatkowe kolumny: kolumna nie została usunięta po wyłączeniu.') }
+    $menu = New-Object System.Windows.Controls.ContextMenu
+    Update-HTHeaderMenu -Module $xm -Menu $menu -Column 'Nazwa'
+    if (-not @($menu.Items | Where-Object { $_ -is [System.Windows.Controls.MenuItem] -and ([string]$_.Header -match 'Dodaj kolumny z danymi' -or ($_.Header -is [System.Windows.FrameworkElement] -and @($_.Header.Children | Where-Object { [string]$_.Text -match 'Dodaj kolumny z danymi' }).Count)) }).Count) { $failures.Add('Dodatkowe kolumny: brak pozycji w menu nagłówka.') }
+    Write-Host 'Dodatkowe kolumny: dopisanie, wartości, filtr i usunięcie - OK.'
+}
+catch { $failures.Add("Dodatkowe kolumny: $($_.Exception.Message)") }
+
 # Przegląd wszystkich sekcji bez połączeń: moduły usług - pominięte, moduły bez usług - przycisk odczytu naprawdę
 try {
     $sweep = @(Invoke-HTModuleSweep -ExcludeKeys @('sites.connect', 'org.selftest'))
